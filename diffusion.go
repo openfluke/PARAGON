@@ -179,6 +179,7 @@ func (d *DiffusionModel) Train(sentences []string) {
 	}
 }
 
+// diffusion.go (only Generate function updated)
 func (d *DiffusionModel) Generate() string {
 	current := make([]int, d.Config.MaxLength)
 	for i := range current {
@@ -193,10 +194,18 @@ func (d *DiffusionModel) Generate() string {
 		for i, tok := range noisyInput {
 			input[0][i] = float64(tok)
 		}
-		output := d.Network.ForwardTransformer(input)
+		outputFlat := d.Network.ForwardTransformer(input) // [1][MaxLength*VocabSize], e.g., [1][690]
+
+		// Reshape [1][690] to [10][69]
+		output := make([][]float64, d.Config.MaxLength)
+		for i := 0; i < d.Config.MaxLength; i++ {
+			start := i * d.Tokenizer.VocabSize
+			end := (i + 1) * d.Tokenizer.VocabSize
+			output[i] = outputFlat[0][start:end]
+		}
 
 		for i := 0; i < d.Config.MaxLength; i++ {
-			probs := Softmax(output[i])
+			probs := Softmax(output[i]) // Now [69] per token
 			for j := range probs {
 				probs[j] /= d.Config.Temperature
 				if d.SpecialTokens[j] {

@@ -154,10 +154,11 @@ func SoftmaxWithGrad(inputs []float64) ([]float64, []float64) {
 	return probs, dProbs
 }
 
+// transformer.go (partial update)
 func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 	n.Forward(inputs)
 	hiddenLayer := n.Layers[1]
-	hiddenValues := hiddenLayer.NeuronsToValues()
+	hiddenValues := hiddenLayer.NeuronsToValues() // [MaxLength][DModel], e.g., [10][128]
 	pe := PositionalEncoding(hiddenLayer.Height, hiddenLayer.Width)
 	for y := 0; y < len(hiddenValues); y++ {
 		for x := 0; x < len(hiddenValues[y]); x++ {
@@ -166,12 +167,8 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		hiddenValues[y] = LayerNorm(hiddenValues[y])
 	}
 
-	headSize := hiddenLayer.Width / 4
+	headSize := hiddenLayer.Width / 4 // 32
 	heads := make([][][]float64, 4)
-	var dQs, dKs, dVs [][][]float64
-	dQs = make([][][]float64, 4)
-	dKs = make([][][]float64, 4)
-	dVs = make([][][]float64, 4)
 	for h := 0; h < 4; h++ {
 		qHead := make([][]float64, len(hiddenValues))
 		kHead := make([][]float64, len(hiddenValues))
@@ -188,7 +185,7 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 				}
 			}
 		}
-		heads[h], dQs[h], dKs[h], dVs[h] = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
+		heads[h], _, _, _ = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
 	}
 	attnOutput := make([][]float64, hiddenLayer.Height)
 	for y := range attnOutput {
@@ -201,11 +198,12 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
 		for x := 0; x < hiddenLayer.Width; x++ {
-			attnOutput[y][x] += hiddenValues[y][x]
+			attnOutput[y][x] += hiddenValues[y][x] // Residual
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
 	}
 
+	// Feed-forward layer
 	ffOutput := make([][]float64, hiddenLayer.Height)
 	for y := range ffOutput {
 		ffOutput[y] = make([]float64, hiddenLayer.Width)
@@ -215,7 +213,7 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 		for x := 0; x < hiddenLayer.Width; x++ {
-			ffOutput[y][x] += attnOutput[y][x]
+			ffOutput[y][x] += attnOutput[y][x] // Residual
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 	}
@@ -226,7 +224,10 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		}
 	}
 
-	outputLayer := n.Layers[n.OutputLayer]
+	outputLayer := n.Layers[n.OutputLayer] // [MaxLength][VocabSize], e.g., [10][69]
+	output := make([][]float64, 1)
+	output[0] = make([]float64, outputLayer.Height*outputLayer.Width) // [1][MaxLength*VocabSize], [1][690]
+	idx := 0
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
 			neuron := outputLayer.Neurons[y][x]
@@ -236,9 +237,11 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 				sum += srcNeuron.Value * conn.Weight
 			}
 			neuron.Value = applyActivation(sum, neuron.Activation)
+			output[0][idx] = neuron.Value
+			idx++
 		}
 	}
-	return outputLayer.NeuronsToValues()
+	return output
 }
 
 func (n *Grid) NeuronsToValues() [][]float64 {
