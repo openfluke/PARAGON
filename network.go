@@ -38,6 +38,7 @@ type Network struct {
 	InputLayer  int
 	OutputLayer int
 	Debug       bool
+	AttnWeights []AttentionWeights // Per head
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -165,6 +166,7 @@ func (n *Network) Forward(inputs [][]float64) {
 }
 
 // Backward performs backpropagation
+// network.go (partial update)
 func (n *Network) Backward(targets [][]float64, learningRate float64) {
 	errorTerms := make([][][]float64, len(n.Layers))
 	for l := range n.Layers {
@@ -175,19 +177,23 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 	}
 
 	outputLayer := n.Layers[n.OutputLayer]
-	if outputLayer.Neurons[0][0].Activation == "softmax" {
-		for y := 0; y < outputLayer.Height; y++ {
-			for x := 0; x < outputLayer.Width; x++ {
-				neuron := outputLayer.Neurons[y][x]
-				errorTerms[n.OutputLayer][y][x] = neuron.Value - targets[y][x]
-			}
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			neuron := outputLayer.Neurons[y][x]
+			errorTerms[n.OutputLayer][y][x] = (targets[y][x] - neuron.Value) * activationDerivative(neuron.Value, neuron.Activation)
 		}
-	} else {
-		for y := 0; y < outputLayer.Height; y++ {
-			for x := 0; x < outputLayer.Width; x++ {
-				neuron := outputLayer.Neurons[y][x]
-				errorTerms[n.OutputLayer][y][x] = (targets[y][x] - neuron.Value) *
-					activationDerivative(neuron.Value, neuron.Activation)
+	}
+
+	hiddenLayer := n.Layers[1]
+	headSize := hiddenLayer.Width / 4
+	attnGradients := make([][][]float64, 4)
+	for h := 0; h < 4; h++ {
+		attnGradients[h] = make([][]float64, hiddenLayer.Height)
+		for y := 0; y < hiddenLayer.Height; y++ {
+			attnGradients[h][y] = make([]float64, headSize)
+			start := h * headSize
+			for x := 0; x < headSize; x++ {
+				attnGradients[h][y][x] = errorTerms[1][y][start+x]
 			}
 		}
 	}
@@ -218,10 +224,36 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		if l-1 > 0 {
 			for y := 0; y < prevLayer.Height; y++ {
 				for x := 0; x < prevLayer.Width; x++ {
-					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value,
-						prevLayer.Neurons[y][x].Activation)
-					if n.Debug && errorTerms[l-1][y][x] != 0 {
-						fmt.Printf("Layer %d, Neuron (%d,%d): ErrorTerm=%.4f\n", l-1, x, y, errorTerms[l-1][y][x])
+					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
+				}
+			}
+			for h := 0; h < 4; h++ {
+				for i := 0; i < hiddenLayer.Width; i++ {
+					for j := 0; j < headSize; j++ {
+						gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
+						for y := 0; y < hiddenLayer.Height; y++ {
+							gradientQ += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+							gradientK += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+							gradientV += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+						}
+						if gradientQ > 5.0 {
+							gradientQ = 5.0
+						} else if gradientQ < -5.0 {
+							gradientQ = -5.0
+						}
+						if gradientK > 5.0 {
+							gradientK = 5.0
+						} else if gradientK < -5.0 {
+							gradientK = -5.0
+						}
+						if gradientV > 5.0 {
+							gradientV = 5.0
+						} else if gradientV < -5.0 {
+							gradientV = -5.0
+						}
+						n.AttnWeights[h].QWeights[i][j] += learningRate * gradientQ
+						n.AttnWeights[h].KWeights[i][j] += learningRate * gradientK
+						n.AttnWeights[h].VWeights[i][j] += learningRate * gradientV
 					}
 				}
 			}

@@ -58,3 +58,8 @@ func activationDerivative(value float64, activation string) float64 {
 		return 1 // Fallback to linear
 	}
 }
+
+// softmaxDerivative is a placeholder; we'll use direct loss computation for softmax
+func softmaxDerivative(value float64) float64 {
+	return value * (1 - value) // Simplified, not used directly in our case
+}
