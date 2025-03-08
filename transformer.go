@@ -116,9 +116,16 @@ func ScaledDotProductAttention(q, k, v [][]float64, headSize int) ([][]float64, 
 	for i := range output {
 		output[i] = make([]float64, len(v[0]))
 		dQ[i] = make([]float64, d)
+		dK[i] = make([]float64, d)
+		dV[i] = make([]float64, len(v[0]))
 		for j := range v {
 			for l := 0; l < len(v[0]); l++ {
 				output[i][l] += scores[i][j] * v[j][l]
+				dV[i][l] += scores[i][j] // Simplified gradient
+			}
+			for l := 0; l < d; l++ {
+				dQ[i][l] += dScores[i][j] * k[j][l]
+				dK[i][l] += dScores[i][j] * q[i][l]
 			}
 		}
 	}
@@ -161,6 +168,10 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 
 	headSize := hiddenLayer.Width / 4
 	heads := make([][][]float64, 4)
+	var dQs, dKs, dVs [][][]float64
+	dQs = make([][][]float64, 4)
+	dKs = make([][][]float64, 4)
+	dVs = make([][][]float64, 4)
 	for h := 0; h < 4; h++ {
 		qHead := make([][]float64, len(hiddenValues))
 		kHead := make([][]float64, len(hiddenValues))
@@ -170,18 +181,14 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 			kHead[i] = make([]float64, headSize)
 			vHead[i] = make([]float64, headSize)
 			for j := 0; j < headSize; j++ {
-				qSum, kSum, vSum := 0.0, 0.0, 0.0
 				for k := 0; k < hiddenLayer.Width; k++ {
-					qSum += hiddenValues[i][k] * n.AttnWeights[h].QWeights[k][j]
-					kSum += hiddenValues[i][k] * n.AttnWeights[h].KWeights[k][j]
-					vSum += hiddenValues[i][k] * n.AttnWeights[h].VWeights[k][j]
+					qHead[i][j] += hiddenValues[i][k] * n.AttnWeights[h].QWeights[k][j]
+					kHead[i][j] += hiddenValues[i][k] * n.AttnWeights[h].KWeights[k][j]
+					vHead[i][j] += hiddenValues[i][k] * n.AttnWeights[h].VWeights[k][j]
 				}
-				qHead[i][j] = qSum
-				kHead[i][j] = kSum
-				vHead[i][j] = vSum
 			}
 		}
-		heads[h], _, _, _ = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
+		heads[h], dQs[h], dKs[h], dVs[h] = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
 	}
 	attnOutput := make([][]float64, hiddenLayer.Height)
 	for y := range attnOutput {
@@ -194,22 +201,21 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
 		for x := 0; x < hiddenLayer.Width; x++ {
-			attnOutput[y][x] += hiddenValues[y][x] // Residual
+			attnOutput[y][x] += hiddenValues[y][x]
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
 	}
 
-	// Feed-forward layer
 	ffOutput := make([][]float64, hiddenLayer.Height)
 	for y := range ffOutput {
 		ffOutput[y] = make([]float64, hiddenLayer.Width)
 		for x := 0; x < hiddenLayer.Width; x++ {
-			sum := attnOutput[y][x] * 0.1 // Simple FF simulation
+			sum := attnOutput[y][x] * 0.1
 			ffOutput[y][x] = applyActivation(sum, "relu")
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 		for x := 0; x < hiddenLayer.Width; x++ {
-			ffOutput[y][x] += attnOutput[y][x] // Residual
+			ffOutput[y][x] += attnOutput[y][x]
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 	}
