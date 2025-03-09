@@ -39,6 +39,7 @@ type Network struct {
 	OutputLayer int
 	Debug       bool
 	AttnWeights []AttentionWeights // Per head
+	NHeads      int
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -50,6 +51,7 @@ func NewNetwork(layerSizes []struct{ Width, Height int }, activations []string, 
 		Layers:      make([]Grid, len(layerSizes)),
 		InputLayer:  0,
 		OutputLayer: len(layerSizes) - 1,
+		NHeads:      0, // Default to 0, set by NewTransformerEncoder if needed
 	}
 	idCounter := 0
 	for i, size := range layerSizes {
@@ -136,7 +138,7 @@ func (n *Network) ConnectLayers(fullyConnected []bool) {
 func (n *Network) Forward(inputs [][]float64) {
 	inputGrid := n.Layers[n.InputLayer]
 	if len(inputs) != inputGrid.Height || len(inputs[0]) != inputGrid.Width {
-		panic("input dimensions mismatch")
+		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d", inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
 	}
 	for y := 0; y < inputGrid.Height; y++ {
 		for x := 0; x < inputGrid.Width; x++ {
@@ -184,16 +186,20 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	hiddenLayer := n.Layers[1]
-	headSize := hiddenLayer.Width / 4
-	attnGradients := make([][][]float64, 4)
-	for h := 0; h < 4; h++ {
-		attnGradients[h] = make([][]float64, hiddenLayer.Height)
-		for y := 0; y < hiddenLayer.Height; y++ {
-			attnGradients[h][y] = make([]float64, headSize)
-			start := h * headSize
-			for x := 0; x < headSize; x++ {
-				attnGradients[h][y][x] = errorTerms[1][y][start+x]
+	// Only compute attention gradients if this is a transformer network
+	var attnGradients [][][]float64
+	if n.NHeads > 0 && len(n.AttnWeights) > 0 {
+		hiddenLayer := n.Layers[1]
+		headSize := hiddenLayer.Width / n.NHeads
+		attnGradients = make([][][]float64, n.NHeads)
+		for h := 0; h < n.NHeads; h++ {
+			attnGradients[h] = make([][]float64, hiddenLayer.Height)
+			for y := 0; y < hiddenLayer.Height; y++ {
+				attnGradients[h][y] = make([]float64, headSize)
+				start := h * headSize
+				for x := 0; x < headSize; x++ {
+					attnGradients[h][y][x] = errorTerms[1][y][start+x]
+				}
 			}
 		}
 	}
@@ -227,33 +233,38 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
 				}
 			}
-			for h := 0; h < 4; h++ {
-				for i := 0; i < hiddenLayer.Width; i++ {
-					for j := 0; j < headSize; j++ {
-						gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
-						for y := 0; y < hiddenLayer.Height; y++ {
-							gradientQ += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
-							gradientK += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
-							gradientV += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+			// Transformer-specific attention weight updates
+			if n.NHeads > 0 && len(n.AttnWeights) > 0 {
+				hiddenLayer := n.Layers[1]
+				headSize := hiddenLayer.Width / n.NHeads
+				for h := 0; h < n.NHeads; h++ {
+					for i := 0; i < hiddenLayer.Width; i++ {
+						for j := 0; j < headSize; j++ {
+							gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
+							for y := 0; y < hiddenLayer.Height; y++ {
+								gradientQ += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+								gradientK += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+								gradientV += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+							}
+							if gradientQ > 5.0 {
+								gradientQ = 5.0
+							} else if gradientQ < -5.0 {
+								gradientQ = -5.0
+							}
+							if gradientK > 5.0 {
+								gradientK = 5.0
+							} else if gradientK < -5.0 {
+								gradientK = -5.0
+							}
+							if gradientV > 5.0 {
+								gradientV = 5.0
+							} else if gradientV < -5.0 {
+								gradientV = -5.0
+							}
+							n.AttnWeights[h].QWeights[i][j] += learningRate * gradientQ
+							n.AttnWeights[h].KWeights[i][j] += learningRate * gradientK
+							n.AttnWeights[h].VWeights[i][j] += learningRate * gradientV
 						}
-						if gradientQ > 5.0 {
-							gradientQ = 5.0
-						} else if gradientQ < -5.0 {
-							gradientQ = -5.0
-						}
-						if gradientK > 5.0 {
-							gradientK = 5.0
-						} else if gradientK < -5.0 {
-							gradientK = -5.0
-						}
-						if gradientV > 5.0 {
-							gradientV = 5.0
-						} else if gradientV < -5.0 {
-							gradientV = -5.0
-						}
-						n.AttnWeights[h].QWeights[i][j] += learningRate * gradientQ
-						n.AttnWeights[h].KWeights[i][j] += learningRate * gradientK
-						n.AttnWeights[h].VWeights[i][j] += learningRate * gradientV
 					}
 				}
 			}
