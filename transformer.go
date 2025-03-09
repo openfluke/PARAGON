@@ -31,7 +31,7 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 		panic(fmt.Sprintf("invalid MaxLength: %d", config.MaxLength))
 	}
 	layerSizes := []struct{ Width, Height int }{
-		{config.MaxLength, 1},
+		{config.VocabSize, config.MaxLength}, // Fixed: [MaxLength][VocabSize]
 		{config.DModel, config.MaxLength},
 		{config.VocabSize, config.MaxLength},
 	}
@@ -39,6 +39,7 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 	fullyConnected := []bool{true, true, true}
 
 	n := NewNetwork(layerSizes, activations, fullyConnected)
+	// Rest of the function remains unchanged
 	n.AttnWeights = make([]AttentionWeights, config.NHeads)
 	headSize := config.DModel / config.NHeads
 	for h := range n.AttnWeights {
