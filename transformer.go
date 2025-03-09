@@ -39,6 +39,7 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 	fullyConnected := []bool{true, true, true}
 
 	n := NewNetwork(layerSizes, activations, fullyConnected)
+	n.NHeads = config.NHeads // Add this line
 	// Rest of the function remains unchanged
 	n.AttnWeights = make([]AttentionWeights, config.NHeads)
 	headSize := config.DModel / config.NHeads
@@ -157,9 +158,12 @@ func SoftmaxWithGrad(inputs []float64) ([]float64, []float64) {
 
 // transformer.go (partial update)
 func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
+	// Forward pass through the input layer
 	n.Forward(inputs)
 	hiddenLayer := n.Layers[1]
 	hiddenValues := hiddenLayer.NeuronsToValues() // [MaxLength][DModel], e.g., [10][128]
+
+	// Add positional encoding and normalize
 	pe := PositionalEncoding(hiddenLayer.Height, hiddenLayer.Width)
 	for y := 0; y < len(hiddenValues); y++ {
 		for x := 0; x < len(hiddenValues[y]); x++ {
@@ -168,9 +172,10 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		hiddenValues[y] = LayerNorm(hiddenValues[y])
 	}
 
-	headSize := hiddenLayer.Width / 4 // 32
-	heads := make([][][]float64, 4)
-	for h := 0; h < 4; h++ {
+	// Multi-head attention mechanism
+	headSize := hiddenLayer.Width / n.NHeads // e.g., 128 / 2 = 64
+	heads := make([][][]float64, n.NHeads)   // [NHeads][MaxLength][headSize], e.g., [2][10][64]
+	for h := 0; h < n.NHeads; h++ {
 		qHead := make([][]float64, len(hiddenValues))
 		kHead := make([][]float64, len(hiddenValues))
 		vHead := make([][]float64, len(hiddenValues))
@@ -188,46 +193,52 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		}
 		heads[h], _, _, _ = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
 	}
-	attnOutput := make([][]float64, hiddenLayer.Height)
+
+	// Construct attention output with dynamic number of heads
+	attnOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel], e.g., [10][128]
 	for y := range attnOutput {
 		attnOutput[y] = make([]float64, hiddenLayer.Width)
-		for h := 0; h < 4; h++ {
+		for h := 0; h < n.NHeads; h++ { // Fixed: Use n.NHeads instead of hardcoded 4
 			start := h * headSize
 			for x := 0; x < headSize; x++ {
 				attnOutput[y][start+x] = heads[h][y][x]
 			}
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
+		// Add residual connection
 		for x := 0; x < hiddenLayer.Width; x++ {
-			attnOutput[y][x] += hiddenValues[y][x] // Residual
+			attnOutput[y][x] += hiddenValues[y][x]
 		}
 		attnOutput[y] = LayerNorm(attnOutput[y])
 	}
 
-	// Feed-forward layer
-	ffOutput := make([][]float64, hiddenLayer.Height)
+	// Feed-forward layer (simplified, consider expanding to standard two-layer FFN)
+	ffOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel], e.g., [10][128]
 	for y := range ffOutput {
 		ffOutput[y] = make([]float64, hiddenLayer.Width)
 		for x := 0; x < hiddenLayer.Width; x++ {
-			sum := attnOutput[y][x] * 0.1
+			sum := attnOutput[y][x] * 0.1 // Placeholder; typically a linear layer here
 			ffOutput[y][x] = applyActivation(sum, "relu")
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
+		// Add residual connection
 		for x := 0; x < hiddenLayer.Width; x++ {
-			ffOutput[y][x] += attnOutput[y][x] // Residual
+			ffOutput[y][x] += attnOutput[y][x]
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 	}
 
+	// Update hidden layer neuron values
 	for y := 0; y < hiddenLayer.Height; y++ {
 		for x := 0; x < hiddenLayer.Width; x++ {
 			hiddenLayer.Neurons[y][x].Value = ffOutput[y][x]
 		}
 	}
 
+	// Compute output layer
 	outputLayer := n.Layers[n.OutputLayer] // [MaxLength][VocabSize], e.g., [10][69]
 	output := make([][]float64, 1)
-	output[0] = make([]float64, outputLayer.Height*outputLayer.Width) // [1][MaxLength*VocabSize], [1][690]
+	output[0] = make([]float64, outputLayer.Height*outputLayer.Width) // [1][MaxLength*VocabSize], e.g., [1][690]
 	idx := 0
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {

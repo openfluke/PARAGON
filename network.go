@@ -242,9 +242,9 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 						for j := 0; j < headSize; j++ {
 							gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
 							for y := 0; y < hiddenLayer.Height; y++ {
-								gradientQ += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
-								gradientK += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
-								gradientV += attnGradients[h][y][j] * prevLayer.Neurons[y][i].Value
+								gradientQ += attnGradients[h][y][j] * hiddenLayer.Neurons[y][i].Value
+								gradientK += attnGradients[h][y][j] * hiddenLayer.Neurons[y][i].Value
+								gradientV += attnGradients[h][y][j] * hiddenLayer.Neurons[y][i].Value
 							}
 							if gradientQ > 5.0 {
 								gradientQ = 5.0
@@ -268,6 +268,7 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 					}
 				}
 			}
+
 		}
 	}
 }
