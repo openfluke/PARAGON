@@ -40,6 +40,11 @@ type Network struct {
 	Debug       bool
 	AttnWeights []AttentionWeights // Per head
 	NHeads      int
+	FFWeights1  [][]float64       // [DModel][FeedForward]
+	FFBias1     []float64         // [FeedForward]
+	FFWeights2  [][]float64       // [FeedForward][DModel]
+	FFBias2     []float64         // [DModel]
+	Config      TransformerConfig // Configuration settings
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity

@@ -14,12 +14,16 @@ import (
 
 // DiffusionConfig defines parameters for the diffusion process
 type DiffusionConfig struct {
-	NumTimesteps int     // Number of diffusion steps
-	MaxLength    int     // Maximum sequence length
+	NumTimesteps int     // Number of diffusion steps, e.g. 50
+	MaxLength    int     // Maximum sequence length, e.g. 64
 	LearningRate float64 // Learning rate for training
 	Epochs       int     // Number of training epochs
 	Temperature  float64 // Temperature for sampling
 	TopK         int     // Top-k sampling parameter
+
+	// Below are new fields for improved discrete diffusion
+	MaskScheduleStart float64 // fraction of tokens to mask at t=0
+	MaskScheduleEnd   float64 // fraction of tokens to mask at t=NumTimesteps-1
 }
 
 // DiffusionModel encapsulates a network with diffusion capabilities
@@ -28,6 +32,10 @@ type DiffusionModel struct {
 	Config        DiffusionConfig
 	Tokenizer     *CustomTokenizer
 	SpecialTokens map[int]bool
+
+	// A per-step fraction of tokens to mask. E.g. fraction[0] = 0.1, fraction[1] = 0.15, ...
+	// We'll fill this in once on model creation.
+	MaskFraction []float64
 }
 
 // CustomTokenizer (moved here for modularity)
@@ -88,15 +96,33 @@ func (t *CustomTokenizer) Decode(ids []int) string {
 	return strings.Join(words, " ")
 }
 
-// NewDiffusionModel initializes a diffusion model with a network
+// NewDiffusionModel initializes a diffusion model with a network & improved mask schedule
 func NewDiffusionModel(network *Network, config DiffusionConfig, sentences []string) *DiffusionModel {
 	tokenizer := NewCustomTokenizer(sentences)
-	return &DiffusionModel{
+
+	// Create the model
+	d := &DiffusionModel{
 		Network:       network,
 		Config:        config,
 		Tokenizer:     tokenizer,
 		SpecialTokens: tokenizer.SpecialTokens,
+		MaskFraction:  make([]float64, config.NumTimesteps),
 	}
+
+	// Fill in the mask schedule from start to end (linear, or tweak if you like)
+	// For example, if MaskScheduleStart=0.2, MaskScheduleEnd=0.8, then over timesteps we go linearly from 0.2 -> 0.8
+	for t := 0; t < config.NumTimesteps; t++ {
+		frac := config.MaskScheduleStart + (config.MaskScheduleEnd-config.MaskScheduleStart)*float64(t)/float64(config.NumTimesteps-1)
+		if frac < 0 {
+			frac = 0
+		}
+		if frac > 1 {
+			frac = 1
+		}
+		d.MaskFraction[t] = frac
+	}
+
+	return d
 }
 
 func (d *DiffusionModel) AddNoise(tokens []int, t int) []int {
@@ -420,14 +446,14 @@ func trainMaskedDiffusion(model *DiffusionModel, sentences []string, tokenizer *
 
 func (d *DiffusionModel) GenerateMasked() string {
 	maskTokenID := d.Tokenizer.Vocab["[MASK]"]
+	//fmt.Println("maskTokenID:", maskTokenID) // Debug: Should be 4
 	current := make([]int, d.Config.MaxLength)
 	for i := range current {
 		current[i] = maskTokenID
 	}
-	fmt.Println("Initial fully masked sequence:", d.Tokenizer.Decode(current))
+	//fmt.Println("Initial fully masked sequence:", d.Tokenizer.Decode(current))
 	steps := d.Config.NumTimesteps
 	for s := steps; s > 0; s-- {
-		// Prepare input as [MaxLength][VocabSize]
 		input := make([][]float64, d.Config.MaxLength)
 		for k := 0; k < d.Config.MaxLength; k++ {
 			input[k] = make([]float64, d.Tokenizer.VocabSize)
@@ -436,7 +462,6 @@ func (d *DiffusionModel) GenerateMasked() string {
 				input[k][tok] = 1.0
 			}
 		}
-		// Forward pass with correctly shaped input
 		outputFlat := d.Network.ForwardTransformer(input)
 		output := make([][]float64, d.Config.MaxLength)
 		for i := 0; i < d.Config.MaxLength; i++ {
@@ -444,24 +469,57 @@ func (d *DiffusionModel) GenerateMasked() string {
 			end := (i + 1) * d.Tokenizer.VocabSize
 			output[i] = outputFlat[0][start:end]
 		}
-		// Update masked positions
 		maskedPositions := []int{}
 		for i := 0; i < d.Config.MaxLength; i++ {
 			if current[i] == maskTokenID {
 				maskedPositions = append(maskedPositions, i)
 				probs := Softmax(output[i])
-				maxProb := 0.0
-				predToken := maskTokenID
-				for j, p := range probs {
-					if p > maxProb {
-						maxProb = p
-						predToken = j
+				//fmt.Printf("Step %d, Pos %d, Probs: %v\n", s, i, probs)
+				topK := make([]struct {
+					idx  int
+					prob float64
+				}, d.Tokenizer.VocabSize)
+				for j := 0; j < d.Tokenizer.VocabSize; j++ {
+					prob := probs[j] / d.Config.Temperature
+					if j == maskTokenID { // Exclude [MASK] from sampling
+						prob = 0
+					}
+					topK[j] = struct {
+						idx  int
+						prob float64
+					}{j, prob}
+				}
+				sort.Slice(topK, func(i, j int) bool { return topK[i].prob > topK[j].prob })
+				topK = topK[:d.Config.TopK]
+				sum := 0.0
+				for _, p := range topK {
+					sum += p.prob
+				}
+				if sum == 0 { // Fallback if all probs are 0
+					sum = 1.0
+					for j := range topK {
+						topK[j].prob = 1.0 / float64(d.Config.TopK)
+					}
+				} else {
+					for j := range topK {
+						topK[j].prob /= sum
 					}
 				}
-				current[i] = predToken
+				r := rand.Float64()
+				cumulative := 0.0
+				selected := topK[0].idx // Default to highest prob if loop fails
+				for _, tk := range topK {
+					cumulative += tk.prob
+					if r <= cumulative {
+						selected = tk.idx
+						break
+					}
+				}
+				current[i] = selected
+				//fmt.Printf("Step %d, Pos %d, Selected: %d\n", s, i, current[i])
 			}
 		}
-		if s > 1 { // No remasking at the last step
+		if s > 1 {
 			pRemask := float64(s-1) / float64(s)
 			for _, i := range maskedPositions {
 				if rand.Float64() < pRemask {
@@ -469,7 +527,225 @@ func (d *DiffusionModel) GenerateMasked() string {
 				}
 			}
 		}
-		fmt.Printf("Generation step %d: %s\n", s, d.Tokenizer.Decode(current))
+		//fmt.Printf("Generation step %d: %s\n", s, d.Tokenizer.Decode(current))
 	}
+	// Replace remaining [MASK] with 0
+	for i := range current {
+		if current[i] == maskTokenID {
+			current[i] = 0
+		}
+	}
+	//fmt.Println("Final current before decode:", current)
 	return d.Tokenizer.Decode(current)
+}
+
+// BetterAddNoise masks a fixed fraction of tokens (according to MaskFraction[t]) instead of a random fraction
+func (d *DiffusionModel) BetterAddNoise(x0 []int, t int) []int {
+	noisy := make([]int, len(x0))
+	copy(noisy, x0)
+
+	padID := d.Tokenizer.Vocab["[PAD]"]
+	maskID := d.Tokenizer.Vocab["[MASK]"]
+	fraction := d.MaskFraction[t] // fraction of non-pad tokens to mask
+	if fraction <= 0 {
+		return noisy
+	}
+	// Collect indices of non-pad tokens
+	var idxes []int
+	for i, tok := range x0 {
+		if tok != padID {
+			idxes = append(idxes, i)
+		}
+	}
+	// Shuffle them
+	rand.Shuffle(len(idxes), func(i, j int) {
+		idxes[i], idxes[j] = idxes[j], idxes[i]
+	})
+	// Number of tokens to mask
+	k := int(math.Round(float64(len(idxes)) * fraction))
+	for i := 0; i < k; i++ {
+		noisy[idxes[i]] = maskID
+	}
+	return noisy
+}
+
+// TrainBetterDiffusion uses the improved discrete diffusion approach
+// 1) We pick a random step t in [0, NumTimesteps-1]
+// 2) We apply BetterAddNoise(...) to get x_t
+// 3) We feed x_t into the network, compute cross-entropy w.r.t. x0 only on masked positions
+// 4) Single-step update
+func (d *DiffusionModel) TrainBetterDiffusion(samples [][]int) {
+	data := make([][]int, len(samples))
+	copy(data, samples)
+
+	for epoch := 0; epoch < d.Config.Epochs; epoch++ {
+		totalLoss := 0.0
+		lr := d.Config.LearningRate * (1.0 - float64(epoch)/float64(d.Config.Epochs))
+
+		rand.Shuffle(len(data), func(i, j int) {
+			data[i], data[j] = data[j], data[i]
+		})
+
+		for _, x0 := range data {
+			t := rand.Intn(d.Config.NumTimesteps)
+			xt := d.BetterAddNoise(x0, t)
+
+			// BUILD A [MaxLength][VocabSize] array
+			batchInput := make([][]float64, d.Config.MaxLength)
+			for i, tok := range xt {
+				row := make([]float64, d.Tokenizer.VocabSize)
+				if tok >= 0 && tok < d.Tokenizer.VocabSize {
+					row[tok] = 1.0
+				}
+				batchInput[i] = row
+			}
+
+			// forward
+			output2D := d.Network.ForwardTransformer(batchInput) // shape: [1][MaxLength * VocabSize] in paragon
+			preds := output2D[0]                                 // length = MaxLength * VocabSize
+
+			var loss float64
+			errorTerms := make([]float64, d.Config.MaxLength*d.Tokenizer.VocabSize)
+
+			maskID := d.Tokenizer.Vocab["[MASK]"]
+			for i, tok := range xt {
+				if tok == maskID {
+					start := i * d.Tokenizer.VocabSize
+					end := start + d.Tokenizer.VocabSize
+					probs := Softmax(preds[start:end])
+					target := x0[i]
+					loss -= math.Log(math.Max(probs[target], 1e-10))
+					for m := 0; m < d.Tokenizer.VocabSize; m++ {
+						delta := probs[m]
+						if m == target {
+							delta -= 1.0
+						}
+						// clip
+						if delta > 5.0 {
+							delta = 5.0
+						} else if delta < -5.0 {
+							delta = -5.0
+						}
+						errorTerms[start+m] = delta
+					}
+				}
+			}
+
+			totalLoss += loss
+
+			// reshape error terms to [MaxLength][VocabSize]
+			shaped := make([][]float64, d.Config.MaxLength)
+			for i := 0; i < d.Config.MaxLength; i++ {
+				st := i * d.Tokenizer.VocabSize
+				shaped[i] = errorTerms[st : st+d.Tokenizer.VocabSize]
+			}
+			d.Network.Backward(shaped, lr)
+		}
+
+		avgLoss := totalLoss / float64(len(data))
+		if epoch%10 == 0 {
+			fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, avgLoss)
+		}
+	}
+}
+
+// GenerateBetter does a *one-pass* reverse diffusion without re-masking. We start from t=NumTimesteps-1
+// and reduce to t=0, but we do *not* forcibly mask anything again. Instead, we let the model refine
+// step by step, each time denoising from x_t -> x_{t-1} as best it can.
+func (d *DiffusionModel) GenerateBetter() []int {
+	maskID := d.Tokenizer.Vocab["[MASK]"]
+	xcur := make([]int, d.Config.MaxLength)
+	for i := range xcur {
+		xcur[i] = maskID
+	}
+
+	for t := d.Config.NumTimesteps - 1; t >= 0; t-- {
+		batchInput := make([][]float64, d.Config.MaxLength)
+		for i, tok := range xcur {
+			row := make([]float64, d.Tokenizer.VocabSize)
+			if tok >= 0 && tok < d.Tokenizer.VocabSize {
+				row[tok] = 1.0
+			}
+			batchInput[i] = row
+		}
+
+		output2D := d.Network.ForwardTransformer(batchInput)
+		preds := output2D[0]
+
+		maskedPositions := []int{}
+		for i, tok := range xcur {
+			if tok == maskID {
+				maskedPositions = append(maskedPositions, i)
+				start := i * d.Tokenizer.VocabSize
+				end := start + d.Tokenizer.VocabSize
+				probs := Softmax(preds[start:end])
+				if d.Config.Temperature > 1e-12 {
+					for j := range probs {
+						probs[j] /= d.Config.Temperature
+					}
+				}
+				probs[maskID] = 0
+				sum := 0.0
+				for _, p := range probs {
+					sum += p
+				}
+				if sum < 1e-12 {
+					xcur[i] = 0
+					continue
+				}
+				for j := range probs {
+					probs[j] /= sum
+				}
+				topKSlice := make([]struct {
+					idx  int
+					prob float64
+				}, len(probs))
+				for j, p := range probs {
+					topKSlice[j] = struct {
+						idx  int
+						prob float64
+					}{j, p}
+				}
+				sort.Slice(topKSlice, func(a, b int) bool {
+					return topKSlice[a].prob > topKSlice[b].prob
+				})
+				if d.Config.TopK < 1 {
+					d.Config.TopK = 1
+				}
+				if d.Config.TopK > len(topKSlice) {
+					d.Config.TopK = len(topKSlice)
+				}
+				topKSlice = topKSlice[:d.Config.TopK]
+				r := rand.Float64()
+				cumul := 0.0
+				chosen := topKSlice[0].idx
+				for _, pair := range topKSlice {
+					cumul += pair.prob
+					if r <= cumul {
+						chosen = pair.idx
+						break
+					}
+				}
+				xcur[i] = chosen
+			}
+		}
+
+		// Add re-masking if not the last step
+		if t > 0 {
+			pRemask := float64(t) / float64(d.Config.NumTimesteps)
+			for _, i := range maskedPositions {
+				if rand.Float64() < pRemask {
+					xcur[i] = maskID
+				}
+			}
+		}
+	}
+
+	// Replace any remaining [MASK] with 0
+	for i, tok := range xcur {
+		if tok == maskID {
+			xcur[i] = 0
+		}
+	}
+	return xcur
 }

@@ -8,13 +8,15 @@ import (
 )
 
 type TransformerConfig struct {
-	DModel      int
-	NHeads      int
-	NLayers     int
-	FeedForward int
-	VocabSize   int
-	MaxLength   int
-	Activation  string
+	DModel      int    // Dimension of the model
+	NHeads      int    // Number of attention heads
+	NLayers     int    // Number of layers (not used here but part of typical config)
+	FeedForward int    // Size of the feed-forward intermediate layer
+	VocabSize   int    // Size of the vocabulary
+	MaxLength   int    // Maximum sequence length
+	Activation  string // Activation function (e.g., "relu")
+	GridRows    int    // Rows for 2D input (0 for 1D)
+	GridCols    int    // Columns for 2D input (0 for 1D)
 }
 
 type AttentionWeights struct {
@@ -30,17 +32,22 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 	if config.MaxLength <= 0 {
 		panic(fmt.Sprintf("invalid MaxLength: %d", config.MaxLength))
 	}
+
+	// Define layer sizes: Input [MaxLength][VocabSize], Hidden [MaxLength][DModel], Output [MaxLength][VocabSize]
 	layerSizes := []struct{ Width, Height int }{
-		{config.VocabSize, config.MaxLength}, // Fixed: [MaxLength][VocabSize]
-		{config.DModel, config.MaxLength},
-		{config.VocabSize, config.MaxLength},
+		{config.VocabSize, config.MaxLength}, // Input layer
+		{config.DModel, config.MaxLength},    // Hidden layer
+		{config.VocabSize, config.MaxLength}, // Output layer
 	}
 	activations := []string{"linear", config.Activation, "linear"}
 	fullyConnected := []bool{true, true, true}
 
+	// Initialize the network
 	n := NewNetwork(layerSizes, activations, fullyConnected)
-	n.NHeads = config.NHeads // Add this line
-	// Rest of the function remains unchanged
+	n.NHeads = config.NHeads
+	n.Config = config // Store the config for later use
+
+	// Initialize attention weights for multi-head attention
 	n.AttnWeights = make([]AttentionWeights, config.NHeads)
 	headSize := config.DModel / config.NHeads
 	for h := range n.AttnWeights {
@@ -52,6 +59,7 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 			n.AttnWeights[h].KWeights[i] = make([]float64, headSize)
 			n.AttnWeights[h].VWeights[i] = make([]float64, headSize)
 			for j := 0; j < headSize; j++ {
+				// Xavier/Glorot initialization scaled by DModel
 				n.AttnWeights[h].QWeights[i][j] = rand.NormFloat64() * math.Sqrt(2.0/float64(config.DModel))
 				n.AttnWeights[h].KWeights[i][j] = rand.NormFloat64() * math.Sqrt(2.0/float64(config.DModel))
 				n.AttnWeights[h].VWeights[i][j] = rand.NormFloat64() * math.Sqrt(2.0/float64(config.DModel))
@@ -59,11 +67,28 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 		}
 	}
 
-	fmt.Printf("Layer sizes: Input=%dx%d, Hidden=%dx%d, Output=%dx%d\n",
-		n.Layers[0].Width, n.Layers[0].Height,
-		n.Layers[1].Width, n.Layers[1].Height,
-		n.Layers[2].Width, n.Layers[2].Height)
+	// Initialize feed-forward weights and biases
+	// FFWeights1: [DModel][FeedForward]
+	n.FFWeights1 = make([][]float64, config.DModel)
+	for i := range n.FFWeights1 {
+		n.FFWeights1[i] = make([]float64, config.FeedForward)
+		for j := range n.FFWeights1[i] {
+			n.FFWeights1[i][j] = rand.NormFloat64() * math.Sqrt(2.0/float64(config.DModel))
+		}
+	}
+	n.FFBias1 = make([]float64, config.FeedForward) // [FeedForward]
 
+	// FFWeights2: [FeedForward][DModel]
+	n.FFWeights2 = make([][]float64, config.FeedForward)
+	for i := range n.FFWeights2 {
+		n.FFWeights2[i] = make([]float64, config.DModel)
+		for j := range n.FFWeights2[i] {
+			n.FFWeights2[i][j] = rand.NormFloat64() * math.Sqrt(2.0/float64(config.FeedForward))
+		}
+	}
+	n.FFBias2 = make([]float64, config.DModel) // [DModel]
+
+	// Initialize neuron weights and biases for hidden and output layers
 	for l := 1; l < len(n.Layers); l++ {
 		for y := 0; y < n.Layers[l].Height; y++ {
 			for x := 0; x < n.Layers[l].Width; x++ {
@@ -76,6 +101,13 @@ func NewTransformerEncoder(config TransformerConfig) *Network {
 			}
 		}
 	}
+
+	// Debug output
+	fmt.Printf("Layer sizes: Input=%dx%d, Hidden=%dx%d, Output=%dx%d\n",
+		n.Layers[0].Width, n.Layers[0].Height,
+		n.Layers[1].Width, n.Layers[1].Height,
+		n.Layers[2].Width, n.Layers[2].Height)
+
 	return n
 }
 
@@ -161,10 +193,15 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 	// Forward pass through the input layer
 	n.Forward(inputs)
 	hiddenLayer := n.Layers[1]
-	hiddenValues := hiddenLayer.NeuronsToValues() // [MaxLength][DModel], e.g., [10][128]
+	hiddenValues := hiddenLayer.NeuronsToValues() // [MaxLength][DModel]
 
-	// Add positional encoding and normalize
-	pe := PositionalEncoding(hiddenLayer.Height, hiddenLayer.Width)
+	// Add positional encoding (1D or 2D based on config)
+	var pe [][]float64
+	if n.Config.GridRows > 0 && n.Config.GridCols > 0 && hiddenLayer.Height == n.Config.GridRows*n.Config.GridCols {
+		pe = PositionalEncoding2D(n.Config.GridRows, n.Config.GridCols, hiddenLayer.Width)
+	} else {
+		pe = PositionalEncoding(hiddenLayer.Height, hiddenLayer.Width)
+	}
 	for y := 0; y < len(hiddenValues); y++ {
 		for x := 0; x < len(hiddenValues[y]); x++ {
 			hiddenValues[y][x] += pe[y][x]
@@ -173,8 +210,8 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 	}
 
 	// Multi-head attention mechanism
-	headSize := hiddenLayer.Width / n.NHeads // e.g., 128 / 2 = 64
-	heads := make([][][]float64, n.NHeads)   // [NHeads][MaxLength][headSize], e.g., [2][10][64]
+	headSize := hiddenLayer.Width / n.NHeads // e.g., DModel / NHeads
+	heads := make([][][]float64, n.NHeads)   // [NHeads][MaxLength][headSize]
 	for h := 0; h < n.NHeads; h++ {
 		qHead := make([][]float64, len(hiddenValues))
 		kHead := make([][]float64, len(hiddenValues))
@@ -194,11 +231,11 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		heads[h], _, _, _ = ScaledDotProductAttention(qHead, kHead, vHead, headSize)
 	}
 
-	// Construct attention output with dynamic number of heads
-	attnOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel], e.g., [10][128]
+	// Construct attention output
+	attnOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel]
 	for y := range attnOutput {
 		attnOutput[y] = make([]float64, hiddenLayer.Width)
-		for h := 0; h < n.NHeads; h++ { // Fixed: Use n.NHeads instead of hardcoded 4
+		for h := 0; h < n.NHeads; h++ {
 			start := h * headSize
 			for x := 0; x < headSize; x++ {
 				attnOutput[y][start+x] = heads[h][y][x]
@@ -212,13 +249,26 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 		attnOutput[y] = LayerNorm(attnOutput[y])
 	}
 
-	// Feed-forward layer (simplified, consider expanding to standard two-layer FFN)
-	ffOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel], e.g., [10][128]
+	// Feed-forward layer (two-layer FFN)
+	ffOutput := make([][]float64, hiddenLayer.Height) // [MaxLength][DModel]
 	for y := range ffOutput {
 		ffOutput[y] = make([]float64, hiddenLayer.Width)
-		for x := 0; x < hiddenLayer.Width; x++ {
-			sum := attnOutput[y][x] * 0.1 // Placeholder; typically a linear layer here
-			ffOutput[y][x] = applyActivation(sum, "relu")
+		// First layer: [DModel] -> [FeedForward]
+		intermediate := make([]float64, n.Config.FeedForward)
+		for j := 0; j < n.Config.FeedForward; j++ {
+			sum := n.FFBias1[j]
+			for k := 0; k < hiddenLayer.Width; k++ {
+				sum += n.FFWeights1[k][j] * attnOutput[y][k]
+			}
+			intermediate[j] = applyActivation(sum, n.Config.Activation)
+		}
+		// Second layer: [FeedForward] -> [DModel]
+		for j := 0; j < hiddenLayer.Width; j++ {
+			sum := n.FFBias2[j]
+			for k := 0; k < n.Config.FeedForward; k++ {
+				sum += n.FFWeights2[k][j] * intermediate[k]
+			}
+			ffOutput[y][j] = sum // Linear output before normalization
 		}
 		ffOutput[y] = LayerNorm(ffOutput[y])
 		// Add residual connection
@@ -236,9 +286,9 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 	}
 
 	// Compute output layer
-	outputLayer := n.Layers[n.OutputLayer] // [MaxLength][VocabSize], e.g., [10][69]
+	outputLayer := n.Layers[n.OutputLayer] // [MaxLength][VocabSize]
 	output := make([][]float64, 1)
-	output[0] = make([]float64, outputLayer.Height*outputLayer.Width) // [1][MaxLength*VocabSize], e.g., [1][690]
+	output[0] = make([]float64, outputLayer.Height*outputLayer.Width) // [1][MaxLength*VocabSize]
 	idx := 0
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
@@ -285,4 +335,23 @@ func LayerNorm(values []float64) []float64 {
 		norm[i] = (v - mean) / std
 	}
 	return norm
+}
+
+func PositionalEncoding2D(rows, cols, dModel int) [][]float64 {
+	pe := make([][]float64, rows*cols)
+	for i := 0; i < rows*cols; i++ {
+		r := i / cols
+		c := i % cols
+		pe[i] = make([]float64, dModel)
+		for j := 0; j < dModel; j++ {
+			angleR := float64(r) / math.Pow(10000, float64(2*j)/float64(dModel))
+			angleC := float64(c) / math.Pow(10000, float64(2*j)/float64(dModel))
+			if j%2 == 0 {
+				pe[i][j] = math.Sin(angleR) + math.Sin(angleC)
+			} else {
+				pe[i][j] = math.Cos(angleR) + math.Cos(angleC)
+			}
+		}
+	}
+	return pe
 }
