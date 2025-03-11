@@ -231,62 +231,57 @@ func (d *DiffusionModel) Train(sentences []string) {
 
 // diffusion.go (only Generate function updated)
 func (d *DiffusionModel) Generate() string {
+	// current[] holds discrete token IDs, length=MaxLength
 	current := make([]int, d.Config.MaxLength)
+
+	// Random init of tokens
 	for i := range current {
 		current[i] = rand.Intn(d.Tokenizer.VocabSize)
 	}
 	fmt.Println("Initial random tokens:", d.Tokenizer.Decode(current))
 
+	// Step-by-step from t=NumTimesteps-1 down to t=0
 	for t := d.Config.NumTimesteps - 1; t >= 0; t-- {
-		noisyInput := d.AddNoise(current, t)
-		input := make([][]float64, 1)
-		input[0] = make([]float64, d.Config.MaxLength)
-		for i, tok := range noisyInput {
-			input[0][i] = float64(tok)
+		// 1) Build one-hot input [MaxLength][VocabSize]
+		oneHot2D := make([][]float64, d.Config.MaxLength)
+		for i, tok := range current {
+			row := make([]float64, d.Tokenizer.VocabSize)
+			if tok >= 0 && tok < d.Tokenizer.VocabSize {
+				row[tok] = 1.0
+			}
+			oneHot2D[i] = row
 		}
-		outputFlat := d.Network.ForwardTransformer(input) // [1][MaxLength*VocabSize], e.g., [1][690]
 
-		// Reshape [1][690] to [10][69]
-		output := make([][]float64, d.Config.MaxLength)
+		// 2) Forward pass
+		output2D := d.Network.ForwardTransformer(oneHot2D) // shape [1][MaxLength*VocabSize]
+		logits := output2D[0]                              // length = 10*VocabSize
+
+		// 3) For each position i in [0..MaxLength-1], sample a new token
 		for i := 0; i < d.Config.MaxLength; i++ {
 			start := i * d.Tokenizer.VocabSize
-			end := (i + 1) * d.Tokenizer.VocabSize
-			output[i] = outputFlat[0][start:end]
-		}
+			end := start + d.Tokenizer.VocabSize
+			probs := Softmax(logits[start:end])
 
-		for i := 0; i < d.Config.MaxLength; i++ {
-			probs := Softmax(output[i]) // Now [69] per token
-			for j := range probs {
-				probs[j] /= d.Config.Temperature
-				if d.SpecialTokens[j] {
-					probs[j] = 0
+			// Example: top-k or random sampling
+			// Let’s do a simple max-prob pick for clarity:
+			bestToken := 0
+			bestProb := probs[0]
+			for m := 1; m < len(probs); m++ {
+				if probs[m] > bestProb {
+					bestProb = probs[m]
+					bestToken = m
 				}
 			}
-			sum := 0.0
-			for _, p := range probs {
-				sum += p
-			}
-			for j := range probs {
-				probs[j] /= sum
-			}
-			topK := make([]struct {
-				idx  int
-				prob float64
-			}, len(probs))
-			for j := range probs {
-				topK[j] = struct {
-					idx  int
-					prob float64
-				}{j, probs[j]}
-			}
-			sort.Slice(topK, func(i, j int) bool { return topK[i].prob > topK[j].prob })
-			topK = topK[:d.Config.TopK]
-			idx := rand.Intn(d.Config.TopK)
-			current[i] = topK[idx].idx
+			current[i] = bestToken
 		}
-		fmt.Printf("Step %d, tokens: %s\n", t, d.Tokenizer.Decode(current))
+
+		// Optionally, you can do “re-masking” or other diffusion steps.
+		// This snippet just does a single pass each step for demonstration.
 	}
-	return d.Tokenizer.Decode(current)
+
+	// Decode final tokens
+	finalStr := d.Tokenizer.Decode(current)
+	return finalStr
 }
 
 func trainMaskedDiffusion(model *DiffusionModel, sentences []string, tokenizer *CustomTokenizer,

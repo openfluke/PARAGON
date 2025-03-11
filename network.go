@@ -278,6 +278,76 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 	}
 }
 
+// BackwardExternal receives final-layer partial derivatives ∂L/∂(output)
+// directly from your training code. No MSE logic inside.
+func (n *Network) BackwardExternal(
+	gradOutput [][]float64, // shape [height][width] for the final layer
+	learningRate float64,
+) {
+	errorTerms := make([][][]float64, len(n.Layers))
+	for l := range n.Layers {
+		errorTerms[l] = make([][]float64, n.Layers[l].Height)
+		for y := range errorTerms[l] {
+			errorTerms[l][y] = make([]float64, n.Layers[l].Width)
+		}
+	}
+
+	// 1) Final layer: combine gradOutput with derivative of activation
+	outL := n.OutputLayer
+	outputLayer := n.Layers[outL]
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			neuron := outputLayer.Neurons[y][x]
+			dOut_dZ := activationDerivative(neuron.Value, neuron.Activation)
+			// gradOutput[y][x] = ∂L/∂(neuron_output)
+			errorTerms[outL][y][x] = gradOutput[y][x] * dOut_dZ
+		}
+	}
+
+	// 2) Backpropagate through hidden layers
+	for l := n.OutputLayer; l > 0; l-- {
+		currLayer := n.Layers[l]
+		prevLayer := n.Layers[l-1]
+		for y := 0; y < currLayer.Height; y++ {
+			for x := 0; x < currLayer.Width; x++ {
+				neuron := currLayer.Neurons[y][x]
+				localErr := errorTerms[l][y][x]
+
+				// Update bias
+				neuron.Bias -= learningRate * localErr
+
+				// Update weights
+				for i, conn := range neuron.Inputs {
+					srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+					gradW := localErr * srcVal
+					// optional gradient clipping
+					if gradW > 5.0 {
+						gradW = 5.0
+					} else if gradW < -5.0 {
+						gradW = -5.0
+					}
+					neuron.Inputs[i].Weight -= learningRate * gradW
+
+					// Accumulate chain rule for next backprop stage
+					errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
+				}
+			}
+		}
+
+		// Activation derivative for the next layer down
+		if l-1 > 0 {
+			for y := 0; y < prevLayer.Height; y++ {
+				for x := 0; x < prevLayer.Width; x++ {
+					val := prevLayer.Neurons[y][x].Value
+					errorTerms[l-1][y][x] *= activationDerivative(val, prevLayer.Neurons[y][x].Activation)
+				}
+			}
+			// If you want to handle attention gradients, do them here
+			// (similar to your existing code, but with correct chain rule).
+		}
+	}
+}
+
 // Train runs the training loop
 func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int, learningRate float64) {
 	for epoch := 0; epoch < epochs; epoch++ {
