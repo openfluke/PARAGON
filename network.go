@@ -184,8 +184,8 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	outputLayer := n.Layers[n.OutputLayer]
 	// Compute error at the output layer.
+	outputLayer := n.Layers[n.OutputLayer]
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
 			neuron := outputLayer.Neurons[y][x]
@@ -193,7 +193,8 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	// If the network uses attention, use the final hidden layer (last hidden layer index: numLayers-2).
+	// Example: For any attention-gradient computations,
+	// use the final hidden layer (index numLayers-2) instead of a fixed index.
 	var attnGradients [][][]float64
 	if n.NHeads > 0 && len(n.AttnWeights) > 0 {
 		finalHiddenLayer := n.Layers[numLayers-2]
@@ -205,13 +206,14 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 				attnGradients[h][y] = make([]float64, headSize)
 				start := h * headSize
 				for x := 0; x < headSize; x++ {
-					attnGradients[h][y][x] = errorTerms[1][y][start+x] // Updated if needed; adjust based on your design.
+					// Adjust this based on how you want to compute gradients.
+					attnGradients[h][y][x] = errorTerms[numLayers-2][y][start+x]
 				}
 			}
 		}
 	}
 
-	// Backpropagate through layers, from output down to input.
+	// Backpropagate through layers from output down to input.
 	for l := n.OutputLayer; l > 0; l-- {
 		currLayer := n.Layers[l]
 		prevLayer := n.Layers[l-1]
@@ -222,13 +224,13 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 				neuron.Bias += learningRate * localErr
 				for i, conn := range neuron.Inputs {
 					srcNeuron := prevLayer.Neurons[conn.SourceY][conn.SourceX]
-					gradient := localErr * srcNeuron.Value
-					if gradient > 5.0 {
-						gradient = 5.0
-					} else if gradient < -5.0 {
-						gradient = -5.0
+					gradW := localErr * srcNeuron.Value
+					if gradW > 5.0 {
+						gradW = 5.0
+					} else if gradW < -5.0 {
+						gradW = -5.0
 					}
-					neuron.Inputs[i].Weight += learningRate * gradient
+					neuron.Inputs[i].Weight += learningRate * gradW
 					if l-1 > 0 {
 						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
 					}
@@ -241,7 +243,7 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
 				}
 			}
-			// If using attention, update attention weights based on final hidden layer.
+			// If using attention, update attention weights using the final hidden layer.
 			if n.NHeads > 0 && len(n.AttnWeights) > 0 {
 				finalHiddenLayer := n.Layers[numLayers-2]
 				headSize := finalHiddenLayer.Width / n.NHeads

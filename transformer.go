@@ -206,22 +206,19 @@ func SoftmaxWithGrad(inputs []float64) ([]float64, []float64) {
 // transformer.go (partial update)
 func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 	// Process the input layer.
-	n.Forward(inputs) // Sets values in layer 0.
+	n.Forward(inputs) // This sets values in layer 0.
 
-	// Determine indices:
-	// - Hidden layers: indices 1 to len(n.Layers)-2
-	// - Output layer: index len(n.Layers)-1
 	numLayers := len(n.Layers)
 	if numLayers < 3 {
 		panic("Network must have at least an input, one hidden, and an output layer")
 	}
 
-	// Start with the hidden representation from the first hidden layer.
+	// Begin with the hidden representation from the first hidden layer.
 	hidden := n.Layers[1].NeuronsToValues() // shape: [MaxLength][DModel]
 
-	// Loop over all hidden layers (from layer 1 up to the last hidden layer).
+	// Iterate over each hidden layer block (layers 1 to numLayers-2).
 	for layerIdx := 1; layerIdx < numLayers-1; layerIdx++ {
-		// 1. Positional Encoding & LayerNorm (apply per block)
+		// 1. Apply Positional Encoding and Layer Normalization.
 		pe := PositionalEncoding(len(hidden), len(hidden[0]))
 		for i := 0; i < len(hidden); i++ {
 			for j := 0; j < len(hidden[i]); j++ {
@@ -230,9 +227,9 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 			hidden[i] = LayerNorm(hidden[i])
 		}
 
-		// 2. Multi-Head Attention Block
+		// 2. Multi-Head Attention Block.
 		headSize := len(hidden[0]) / n.NHeads
-		heads := make([][][]float64, n.NHeads) // each head's output will have shape [MaxLength][headSize]
+		heads := make([][][]float64, n.NHeads) // Each head: [MaxLength][headSize]
 		for h := 0; h < n.NHeads; h++ {
 			qHead := make([][]float64, len(hidden))
 			kHead := make([][]float64, len(hidden))
@@ -252,7 +249,8 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 			attnOut, _, _, _ := ScaledDotProductAttention(qHead, kHead, vHead, headSize)
 			heads[h] = attnOut
 		}
-		// Combine heads.
+
+		// Combine heads into a single attention output.
 		attnOutput := make([][]float64, len(hidden))
 		for i := 0; i < len(hidden); i++ {
 			attnOutput[i] = make([]float64, len(hidden[0]))
@@ -262,17 +260,17 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 					attnOutput[i][startIdx+j] = heads[h][i][j]
 				}
 			}
-			// Residual connection and layer norm.
+			// Residual connection and layer normalization.
 			for j := 0; j < len(hidden[i]); j++ {
 				attnOutput[i][j] += hidden[i][j]
 			}
 			attnOutput[i] = LayerNorm(attnOutput[i])
 		}
 
-		// 3. Feed-Forward Network Block with Residual Connection
+		// 3. Feed-Forward Block (Two-layer FFN with residual connection).
 		ffOutput := make([][]float64, len(attnOutput))
 		for i := 0; i < len(attnOutput); i++ {
-			// First FFN layer: from DModel to FeedForward dimension.
+			// First layer: from DModel to FeedForward dimension.
 			intermediate := make([]float64, n.Config.FeedForward)
 			for j := 0; j < n.Config.FeedForward; j++ {
 				sum := n.FFBias1[j]
@@ -281,7 +279,7 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 				}
 				intermediate[j] = applyActivation(sum, n.Config.Activation)
 			}
-			// Second FFN layer: back from FeedForward dimension to DModel.
+			// Second layer: back from FeedForward dimension to DModel.
 			ffOutput[i] = make([]float64, len(attnOutput[i]))
 			for j := 0; j < len(attnOutput[i]); j++ {
 				sum := n.FFBias2[j]
@@ -290,7 +288,7 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 				}
 				ffOutput[i][j] = sum
 			}
-			// Residual and layer norm.
+			// Residual connection and layer normalization.
 			ffOutput[i] = LayerNorm(ffOutput[i])
 			for j := 0; j < len(attnOutput[i]); j++ {
 				ffOutput[i][j] += attnOutput[i][j]
@@ -298,25 +296,22 @@ func (n *Network) ForwardTransformer(inputs [][]float64) [][]float64 {
 			ffOutput[i] = LayerNorm(ffOutput[i])
 		}
 
-		// Update the hidden representation for the next block.
+		// Set hidden to the output of this block.
 		hidden = ffOutput
 	}
 
-	// Use the final hidden representation (from the last hidden layer block)
-	// as input to the output layer, which is at index numLayers-1.
+	// Use the final hidden representation (from layer index numLayers-2) for the output layer.
 	outputLayer := n.Layers[numLayers-1]
 	output := make([][]float64, 1)
 	output[0] = make([]float64, outputLayer.Height*outputLayer.Width)
 	idx := 0
-	// Here, we assume the output layer is fully connected to the final hidden layer.
-	lastHidden := hidden // shape: [MaxLength][DModel]
+	lastHidden := hidden // final hidden representation
 	for i := 0; i < outputLayer.Height; i++ {
 		for j := 0; j < outputLayer.Width; j++ {
 			neuron := outputLayer.Neurons[i][j]
 			sum := neuron.Bias
-			// Each output neuron aggregates from the last hidden representation.
 			for _, conn := range neuron.Inputs {
-				// Use the corresponding value from lastHidden.
+				// Here we assume the connection's SourceY and SourceX index into lastHidden.
 				srcVal := lastHidden[conn.SourceY][conn.SourceX]
 				sum += srcVal * conn.Weight
 			}
