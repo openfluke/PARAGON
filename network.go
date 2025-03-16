@@ -45,6 +45,7 @@ type Network struct {
 	FFWeights2  [][]float64       // [FeedForward][DModel]
 	FFBias2     []float64         // [DModel]
 	Config      TransformerConfig // Configuration settings
+	Performance *ADHDPerformance
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -57,6 +58,7 @@ func NewNetwork(layerSizes []struct{ Width, Height int }, activations []string, 
 		InputLayer:  0,
 		OutputLayer: len(layerSizes) - 1,
 		NHeads:      0, // Default to 0, set by NewTransformerEncoder if needed
+		Performance: NewADHDPerformance(),
 	}
 	idCounter := 0
 	for i, size := range layerSizes {

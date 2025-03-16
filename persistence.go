@@ -1,10 +1,12 @@
 package paragon
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // SerializableNeuron holds serializable neuron parameters.
@@ -149,6 +151,12 @@ func (n *Network) fromSerializable(serial SerializableNetwork) error {
 
 // SaveToJSON saves the network parameters to a JSON file.
 func (n *Network) SaveToJSON(filename string) error {
+	// Ensure the directory exists.
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
 	serial := n.toSerializable()
 	data, err := json.MarshalIndent(serial, "", "  ")
 	if err != nil {
@@ -201,4 +209,136 @@ func (n *Network) LoadFromGob(filename string) error {
 		return fmt.Errorf("failed to decode gob: %v", err)
 	}
 	return n.fromSerializable(serial)
+}
+
+func (n *Network) SaveToBinary(filename string) error {
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create model directory: %w", err)
+	}
+	f, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create model file %s: %w", filename, err)
+	}
+	defer f.Close()
+
+	// Save number of layers.
+	if err := binary.Write(f, binary.BigEndian, int32(len(n.Layers))); err != nil {
+		return err
+	}
+	for _, layer := range n.Layers {
+		// Save layer dimensions.
+		if err := binary.Write(f, binary.BigEndian, int32(layer.Width)); err != nil {
+			return err
+		}
+		if err := binary.Write(f, binary.BigEndian, int32(layer.Height)); err != nil {
+			return err
+		}
+		for y := 0; y < layer.Height; y++ {
+			for x := 0; x < layer.Width; x++ {
+				neuron := layer.Neurons[y][x]
+				// Save bias.
+				if err := binary.Write(f, binary.BigEndian, neuron.Bias); err != nil {
+					return err
+				}
+				// Save the number of inputs.
+				numInputs := int32(len(neuron.Inputs))
+				if err := binary.Write(f, binary.BigEndian, numInputs); err != nil {
+					return err
+				}
+				// For each connection, save SourceLayer, SourceX, SourceY, and Weight.
+				for _, conn := range neuron.Inputs {
+					if err := binary.Write(f, binary.BigEndian, int32(conn.SourceLayer)); err != nil {
+						return err
+					}
+					if err := binary.Write(f, binary.BigEndian, int32(conn.SourceX)); err != nil {
+						return err
+					}
+					if err := binary.Write(f, binary.BigEndian, int32(conn.SourceY)); err != nil {
+						return err
+					}
+					if err := binary.Write(f, binary.BigEndian, conn.Weight); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	fmt.Printf("✅ Model saved to %s\n", filename)
+	return nil
+}
+
+func (n *Network) LoadFromBinary(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("failed to open model file %s: %w", filename, err)
+	}
+	defer f.Close()
+
+	var numLayers int32
+	if err := binary.Read(f, binary.BigEndian, &numLayers); err != nil {
+		return err
+	}
+
+	// Reinitialize layers based on saved dimensions.
+	n.Layers = make([]Grid, 0, numLayers)
+	n.OutputLayer = int(numLayers) - 1
+
+	for l := int32(0); l < numLayers; l++ {
+		var width, height int32
+		if err := binary.Read(f, binary.BigEndian, &width); err != nil {
+			return err
+		}
+		if err := binary.Read(f, binary.BigEndian, &height); err != nil {
+			return err
+		}
+		grid := Grid{
+			Width:   int(width),
+			Height:  int(height),
+			Neurons: make([][]*Neuron, height),
+		}
+		for y := 0; y < int(height); y++ {
+			grid.Neurons[y] = make([]*Neuron, int(width))
+			for x := 0; x < int(width); x++ {
+				neuron := &Neuron{}
+				// Read bias.
+				if err := binary.Read(f, binary.BigEndian, &neuron.Bias); err != nil {
+					return err
+				}
+				// Read the number of inputs.
+				var numInputs int32
+				if err := binary.Read(f, binary.BigEndian, &numInputs); err != nil {
+					return err
+				}
+				neuron.Inputs = make([]Connection, numInputs)
+				// For each connection, read SourceLayer, SourceX, SourceY, and Weight.
+				for i := 0; i < int(numInputs); i++ {
+					var srcLayer, srcX, srcY int32
+					if err := binary.Read(f, binary.BigEndian, &srcLayer); err != nil {
+						return err
+					}
+					if err := binary.Read(f, binary.BigEndian, &srcX); err != nil {
+						return err
+					}
+					if err := binary.Read(f, binary.BigEndian, &srcY); err != nil {
+						return err
+					}
+					var weight float64
+					if err := binary.Read(f, binary.BigEndian, &weight); err != nil {
+						return err
+					}
+					neuron.Inputs[i] = Connection{
+						SourceLayer: int(srcLayer),
+						SourceX:     int(srcX),
+						SourceY:     int(srcY),
+						Weight:      weight,
+					}
+				}
+				grid.Neurons[y][x] = neuron
+			}
+		}
+		n.Layers = append(n.Layers, grid)
+	}
+	fmt.Printf("✅ Model loaded from %s\n", filename)
+	return nil
 }
