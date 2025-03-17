@@ -10,8 +10,12 @@ Black → Beyond 100% deviation (model is extremely wrong).
 */
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"math"
+	"os"
+	"time"
 )
 
 // ADHDBucket represents a specific deviation range
@@ -157,4 +161,61 @@ func (n *Network) EvaluateFromCheckpoint(checkpoints [][][]float64, expectedOutp
 	}
 
 	n.Performance.Score = n.ComputeFinalScore()
+}
+
+// EvaluateFromCheckpointFilesWithTiming loads checkpoint files, runs the forward pass
+// from the given checkpoint layer, and evaluates the ADHD score.
+// It returns the computed score along with the total file load and forward times.
+func (n *Network) EvaluateFromCheckpointFilesWithTiming(checkpointFiles []string, expectedOutputs []float64, checkpointLayerIdx int) (score float64, totalLoadTime, totalForwardTime time.Duration) {
+	// Validate that the number of checkpoint files matches the expected outputs.
+	if len(checkpointFiles) != len(expectedOutputs) {
+		fmt.Printf("Error: Mismatched checkpoint files (%d) vs expected outputs (%d) sizes.\n", len(checkpointFiles), len(expectedOutputs))
+		return 0, 0, 0
+	}
+
+	// Reset performance tracking.
+	n.Performance = NewADHDPerformance()
+	actualOutputs := make([]float64, len(checkpointFiles))
+
+	// Process each checkpoint file.
+	for i, cpFile := range checkpointFiles {
+		startLoad := time.Now()
+		data, err := os.ReadFile(cpFile)
+		if err != nil {
+			log.Printf("Failed to read checkpoint file %s: %v", cpFile, err)
+			continue // Skip sample on error
+		}
+		var cpState [][]float64
+		if err := json.Unmarshal(data, &cpState); err != nil {
+			log.Printf("Failed to unmarshal checkpoint file %s: %v", cpFile, err)
+			continue // Skip sample on error
+		}
+		totalLoadTime += time.Since(startLoad)
+
+		startForward := time.Now()
+		n.ForwardFromLayer(checkpointLayerIdx, cpState)
+		totalForwardTime += time.Since(startForward)
+
+		out := n.ExtractOutput()
+		pred := ArgMax(out)
+		actualOutputs[i] = float64(pred)
+	}
+
+	// Evaluate each prediction.
+	for i := range expectedOutputs {
+		result := n.EvaluatePrediction(expectedOutputs[i], actualOutputs[i])
+		n.UpdateADHDPerformance(result)
+	}
+	n.Performance.Score = n.ComputeFinalScore()
+	return n.Performance.Score, totalLoadTime, totalForwardTime
+}
+
+// ExtractOutput returns the output layer values as a slice.
+func (n *Network) ExtractOutput() []float64 {
+	outWidth := n.Layers[n.OutputLayer].Width
+	output := make([]float64, outWidth)
+	for x := 0; x < outWidth; x++ {
+		output[x] = n.Layers[n.OutputLayer].Neurons[0][x].Value
+	}
+	return output
 }
