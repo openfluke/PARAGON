@@ -24,6 +24,7 @@ func (n *Network) GetLayerState(layerIdx int) [][]float64 {
 
 // ForwardFromLayer computes the forward pass starting from the specified layer using the provided state.
 func (n *Network) ForwardFromLayer(layerIdx int, layerState [][]float64) {
+	// Validate inputs
 	if layerIdx < 0 || layerIdx >= n.OutputLayer {
 		panic(fmt.Sprintf("invalid layer index for checkpoint: %d", layerIdx))
 	}
@@ -31,13 +32,13 @@ func (n *Network) ForwardFromLayer(layerIdx int, layerState [][]float64) {
 		panic(fmt.Sprintf("mismatched dimensions for layer state: expected %dx%d, got %dx%d",
 			n.Layers[layerIdx].Height, n.Layers[layerIdx].Width, len(layerState), len(layerState[0])))
 	}
-	// Set the values of layer layerIdx
+	// Set layerIdx values
 	for y := 0; y < n.Layers[layerIdx].Height; y++ {
 		for x := 0; x < n.Layers[layerIdx].Width; x++ {
 			n.Layers[layerIdx].Neurons[y][x].Value = layerState[y][x]
 		}
 	}
-	// Compute subsequent layers up to the output layer
+	// Compute subsequent layers
 	for l := layerIdx + 1; l <= n.OutputLayer; l++ {
 		currLayer := n.Layers[l]
 		for y := 0; y < currLayer.Height; y++ {
@@ -52,7 +53,6 @@ func (n *Network) ForwardFromLayer(layerIdx int, layerState [][]float64) {
 			}
 		}
 	}
-	// Apply softmax if the output layer uses it
 	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
@@ -96,4 +96,41 @@ func (n *Network) LoadLayerState(layerIdx int, filename string) ([][]float64, er
 			n.Layers[layerIdx].Height, n.Layers[layerIdx].Width, len(state), len(state[0]))
 	}
 	return state, nil
+}
+
+// ForwardUntilLayer runs the forward pass only up to the given layer index (inclusive)
+// and returns the state of that layer.
+func (n *Network) ForwardUntilLayer(input [][]float64, stopLayer int) {
+	// Set the input values
+	inputGrid := n.Layers[n.InputLayer]
+	if len(input) != inputGrid.Height || len(input[0]) != inputGrid.Width {
+		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d",
+			inputGrid.Height, inputGrid.Width, len(input), len(input[0])))
+	}
+	for y := 0; y < inputGrid.Height; y++ {
+		for x := 0; x < inputGrid.Width; x++ {
+			inputGrid.Neurons[y][x].Value = input[y][x]
+		}
+	}
+
+	// Propagate forward layer by layer until stopLayer (inclusive)
+	for l := 1; l <= stopLayer; l++ {
+		currLayer := n.Layers[l]
+		for y := 0; y < currLayer.Height; y++ {
+			for x := 0; x < currLayer.Width; x++ {
+				neuron := currLayer.Neurons[y][x]
+				sum := neuron.Bias
+				// Sum over all inputs from previous layer
+				for _, conn := range neuron.Inputs {
+					srcNeuron := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
+					sum += srcNeuron.Value * conn.Weight
+				}
+				neuron.Value = applyActivation(sum, neuron.Activation)
+			}
+		}
+		// If the current layer uses softmax, apply it.
+		if l == n.OutputLayer && n.Layers[l].Neurons[0][0].Activation == "softmax" {
+			n.ApplySoftmax()
+		}
+	}
 }
