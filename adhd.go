@@ -128,3 +128,33 @@ func (n *Network) EvaluateModel(expectedOutputs, actualOutputs []float64) {
 
 	n.Performance.Score = n.ComputeFinalScore()
 }
+
+// EvaluateFromCheckpoint evaluates ADHD metrics using checkpoint states
+func (n *Network) EvaluateFromCheckpoint(checkpoints [][][]float64, expectedOutputs []float64, checkpointLayerIdx int) {
+	if len(checkpoints) != len(expectedOutputs) {
+		fmt.Printf("Error: Mismatched checkpoints (%d) vs expected outputs (%d) sizes.\n", len(checkpoints), len(expectedOutputs))
+		return
+	}
+
+	n.Performance = NewADHDPerformance()
+	actualOutputs := make([]float64, len(expectedOutputs))
+
+	for i := range checkpoints {
+		// Compute output from checkpoint
+		n.ForwardFromLayer(checkpointLayerIdx, checkpoints[i])
+		outputLayer := n.Layers[n.OutputLayer]
+		outputValues := make([]float64, outputLayer.Width)
+		for x := 0; x < outputLayer.Width; x++ {
+			outputValues[x] = outputLayer.Neurons[0][x].Value
+		}
+		pred := ArgMax(outputValues)
+		actualOutputs[i] = float64(pred)
+	}
+
+	for i := range expectedOutputs {
+		result := n.EvaluatePrediction(expectedOutputs[i], actualOutputs[i])
+		n.UpdateADHDPerformance(result)
+	}
+
+	n.Performance.Score = n.ComputeFinalScore()
+}
