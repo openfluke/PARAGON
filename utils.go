@@ -21,3 +21,18 @@ func Softmax(inputs []float64) []float64 {
 	}
 	return expInputs
 }
+
+// ArgMax returns the index of the maximum value in the slice.
+// If the slice is empty, it returns -1.
+func ArgMax(arr []float64) int {
+	if len(arr) == 0 {
+		return -1
+	}
+	maxIdx := 0
+	for i := 1; i < len(arr); i++ {
+		if arr[i] > arr[maxIdx] {
+			maxIdx = i
+		}
+	}
+	return maxIdx
+}
