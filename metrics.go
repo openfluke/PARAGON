@@ -1,6 +1,8 @@
 // metrics.go
 package paragon
 
+import "math"
+
 // ComputeAccuracy calculates the classification accuracy for a dataset.
 func ComputeAccuracy(nn *Network, inputs [][][]float64, targets [][][]float64) float64 {
 	if len(inputs) == 0 {
@@ -60,4 +62,25 @@ func argMax(arr []float64) int {
 		}
 	}
 	return maxIdx
+}
+
+// ComputeLoss calculates the loss for a sample
+func (n *Network) ComputeLoss(target [][]float64) float64 {
+	loss := 0.0
+	outputLayer := n.Layers[n.OutputLayer]
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			outputVal := outputLayer.Neurons[y][x].Value
+			targetVal := target[y][x]
+			// Clamp outputVal to avoid log(0) or log(1 - 0)
+			if outputVal <= 0 {
+				outputVal = 1e-10 // Small positive value
+			} else if outputVal >= 1 {
+				outputVal = 1 - 1e-10 // Slightly less than 1
+			}
+			// Compute cross-entropy loss
+			loss += -targetVal * math.Log(outputVal)
+		}
+	}
+	return loss
 }

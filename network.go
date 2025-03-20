@@ -22,6 +22,7 @@ type Neuron struct {
 	Type       string       // e.g., "dense", extensible for future types
 	Inputs     []Connection // Incoming connections
 	IsNew      bool         // Flag for newly added neurons
+	Dimension  *Network
 }
 
 // Connection defines a link from a source neuron
@@ -145,30 +146,115 @@ func (n *Network) ConnectLayers(fullyConnected []bool) {
 func (n *Network) Forward(inputs [][]float64) {
 	inputGrid := n.Layers[n.InputLayer]
 	if len(inputs) != inputGrid.Height || len(inputs[0]) != inputGrid.Width {
-		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d", inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
+		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d",
+			inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
 	}
+
+	// 1) Load the user inputs into the input layer
 	for y := 0; y < inputGrid.Height; y++ {
 		for x := 0; x < inputGrid.Width; x++ {
 			inputGrid.Neurons[y][x].Value = inputs[y][x]
 		}
 	}
+
+	// 2) For each subsequent layer
 	for l := 1; l < len(n.Layers); l++ {
 		currLayer := n.Layers[l]
+
+		// Precompute partial sums for all neurons in this layer
+		partialSums := make([][]float64, currLayer.Height)
+		for yy := 0; yy < currLayer.Height; yy++ {
+			partialSums[yy] = make([]float64, currLayer.Width)
+			for xx := 0; xx < currLayer.Width; xx++ {
+				neuron := currLayer.Neurons[yy][xx]
+				tempSum := neuron.Bias
+				for _, conn := range neuron.Inputs {
+					srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+					tempSum += srcVal * conn.Weight
+				}
+				partialSums[yy][xx] = tempSum
+			}
+		}
+
+		// Now finalize each neuron's activation
 		for y := 0; y < currLayer.Height; y++ {
 			for x := 0; x < currLayer.Width; x++ {
 				neuron := currLayer.Neurons[y][x]
-				sum := neuron.Bias
-				for _, conn := range neuron.Inputs {
-					srcNeuron := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
-					sum += srcNeuron.Value * conn.Weight
-				}
-				neuron.Value = applyActivation(sum, neuron.Activation)
-				if n.Debug {
-					fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y, neuron.Value)
+				mySum := partialSums[y][x]
+
+				if neuron.Dimension != nil {
+					//--------------------------------------------------------
+					// We look at the sub-network’s input layer size
+					subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
+					inW := subInLayer.Width
+					inH := subInLayer.Height
+					totalIn := inW * inH
+
+					if totalIn == 1 {
+						//--------------------------------------------------------
+						// CASE A: sub-network expects a single scalar
+						//--------------------------------------------------------
+						subInput := [][]float64{{mySum}}
+						neuron.Dimension.Forward(subInput)
+
+					} else {
+						//--------------------------------------------------------
+						// CASE B: sub-network expects multiple inputs, e.g. 1×16
+						// We'll gather the entire row’s partial sums (y) as a vector.
+						// If the layer is 16 wide, partialSums[y] is length=16.
+						// Then we shape it into [inH][inW].
+						//--------------------------------------------------------
+						rowVec := partialSums[y] // length = currLayer.Width
+
+						if len(rowVec) != totalIn {
+							panic(fmt.Sprintf(
+								"Mismatch: sub-network expects %d inputs, but row has length %d",
+								totalIn, len(rowVec),
+							))
+						}
+
+						// Suppose sub-network is 1×16 => we want subInput = [1][16].
+						if inH == 1 && inW == len(rowVec) {
+							// shape: 1 row, inW columns
+							subInput := make([][]float64, 1)
+							subInput[0] = make([]float64, inW)
+							copy(subInput[0], rowVec)
+
+							// Forward into sub-network
+							neuron.Dimension.Forward(subInput)
+
+						} else if inW == 1 && inH == len(rowVec) {
+							// shape: inH rows, 1 column
+							subInput := make([][]float64, len(rowVec))
+							for i := 0; i < len(rowVec); i++ {
+								subInput[i] = []float64{rowVec[i]}
+							}
+							neuron.Dimension.Forward(subInput)
+
+						} else {
+							panic(fmt.Sprintf("Sub-network input is %dx%d, not matching rowVec style",
+								inW, inH))
+						}
+					}
+
+					// The sub-network's final output is presumably 1×1
+					subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
+						Neurons[0][0].Value
+
+					// Optionally apply the main neuron's activation
+					neuron.Value = applyActivation(subOut, neuron.Activation)
+
+				} else {
+					//--------------------------------------------------------
+					// No sub-network → just do normal activation
+					//--------------------------------------------------------
+					neuron.Value = applyActivation(mySum, neuron.Activation)
 				}
 			}
 		}
 	}
+
+	// 3) If final layer is softmax, apply it
 	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
@@ -176,8 +262,9 @@ func (n *Network) Forward(inputs [][]float64) {
 
 // Backward performs backpropagation
 // network.go (partial update)
-func (n *Network) Backward(targets [][]float64, learningRate float64) {
+func (n *Network) Backward(targets [][]float64, lr float64) {
 	numLayers := len(n.Layers)
+	// Prepare errorTerms for each layer
 	errorTerms := make([][][]float64, numLayers)
 	for l := range n.Layers {
 		errorTerms[l] = make([][]float64, n.Layers[l].Height)
@@ -186,99 +273,61 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	// Compute error at the output layer.
-	outputLayer := n.Layers[n.OutputLayer]
-	for y := 0; y < outputLayer.Height; y++ {
-		for x := 0; x < outputLayer.Width; x++ {
-			neuron := outputLayer.Neurons[y][x]
-			errorTerms[n.OutputLayer][y][x] = (targets[y][x] - neuron.Value) * activationDerivative(neuron.Value, neuron.Activation)
+	// 1) Output layer error
+	outL := n.OutputLayer
+	for y := 0; y < n.Layers[outL].Height; y++ {
+		for x := 0; x < n.Layers[outL].Width; x++ {
+			neuron := n.Layers[outL].Neurons[y][x]
+			errorTerms[outL][y][x] = (targets[y][x] - neuron.Value) *
+				activationDerivative(neuron.Value, neuron.Activation)
 		}
 	}
 
-	// Example: For any attention-gradient computations,
-	// use the final hidden layer (index numLayers-2) instead of a fixed index.
-	var attnGradients [][][]float64
-	if n.NHeads > 0 && len(n.AttnWeights) > 0 {
-		finalHiddenLayer := n.Layers[numLayers-2]
-		headSize := finalHiddenLayer.Width / n.NHeads
-		attnGradients = make([][][]float64, n.NHeads)
-		for h := 0; h < n.NHeads; h++ {
-			attnGradients[h] = make([][]float64, finalHiddenLayer.Height)
-			for y := 0; y < finalHiddenLayer.Height; y++ {
-				attnGradients[h][y] = make([]float64, headSize)
-				start := h * headSize
-				for x := 0; x < headSize; x++ {
-					// Adjust this based on how you want to compute gradients.
-					attnGradients[h][y][x] = errorTerms[numLayers-2][y][start+x]
-				}
-			}
-		}
-	}
-
-	// Backpropagate through layers from output down to input.
-	for l := n.OutputLayer; l > 0; l-- {
+	// 2) Propagate backward
+	for l := outL; l > 0; l-- {
 		currLayer := n.Layers[l]
 		prevLayer := n.Layers[l-1]
+
 		for y := 0; y < currLayer.Height; y++ {
 			for x := 0; x < currLayer.Width; x++ {
 				neuron := currLayer.Neurons[y][x]
 				localErr := errorTerms[l][y][x]
-				neuron.Bias += learningRate * localErr
-				for i, conn := range neuron.Inputs {
-					srcNeuron := prevLayer.Neurons[conn.SourceY][conn.SourceX]
-					gradW := localErr * srcNeuron.Value
-					if gradW > 5.0 {
-						gradW = 5.0
-					} else if gradW < -5.0 {
-						gradW = -5.0
-					}
-					neuron.Inputs[i].Weight += learningRate * gradW
-					if l-1 > 0 {
+
+				if neuron.Dimension != nil {
+					// sub-network final output was subNetOut
+					subNetOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
+						Neurons[0][0].Value
+					fakeTarget := [][]float64{{subNetOut + localErr}}
+					neuron.Dimension.Backward(fakeTarget, lr)
+
+				} else {
+					// Normal weight/bias updates
+					neuron.Bias += lr * localErr
+					for i, conn := range neuron.Inputs {
+						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+						gradW := localErr * srcVal
+						// optional clipping
+						if gradW > 5 {
+							gradW = 5
+						} else if gradW < -5 {
+							gradW = -5
+						}
+						neuron.Inputs[i].Weight += lr * gradW
 						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
 					}
 				}
 			}
 		}
+
+		// 3) Activation derivatives in the next-lower layer
 		if l-1 > 0 {
-			for y := 0; y < prevLayer.Height; y++ {
-				for x := 0; x < prevLayer.Width; x++ {
-					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
-				}
-			}
-			// If using attention, update attention weights using the final hidden layer.
-			if n.NHeads > 0 && len(n.AttnWeights) > 0 {
-				finalHiddenLayer := n.Layers[numLayers-2]
-				headSize := finalHiddenLayer.Width / n.NHeads
-				for h := 0; h < n.NHeads; h++ {
-					for i := 0; i < finalHiddenLayer.Width; i++ {
-						for j := 0; j < headSize; j++ {
-							gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
-							for y := 0; y < finalHiddenLayer.Height; y++ {
-								gradientQ += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-								gradientK += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-								gradientV += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-							}
-							// Apply gradient clipping.
-							if gradientQ > 5.0 {
-								gradientQ = 5.0
-							} else if gradientQ < -5.0 {
-								gradientQ = -5.0
-							}
-							if gradientK > 5.0 {
-								gradientK = 5.0
-							} else if gradientK < -5.0 {
-								gradientK = -5.0
-							}
-							if gradientV > 5.0 {
-								gradientV = 5.0
-							} else if gradientV < -5.0 {
-								gradientV = -5.0
-							}
-							n.AttnWeights[h].QWeights[i][j] += learningRate * gradientQ
-							n.AttnWeights[h].KWeights[i][j] += learningRate * gradientK
-							n.AttnWeights[h].VWeights[i][j] += learningRate * gradientV
-						}
-					}
+			for yy := 0; yy < prevLayer.Height; yy++ {
+				for xx := 0; xx < prevLayer.Width; xx++ {
+					val := prevLayer.Neurons[yy][xx].Value
+					errorTerms[l-1][yy][xx] *= activationDerivative(
+						val,
+						prevLayer.Neurons[yy][xx].Activation,
+					)
 				}
 			}
 		}
@@ -380,21 +429,45 @@ func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int,
 	}
 }
 
-// ComputeLoss calculates the loss for a sample
-func (n *Network) ComputeLoss(target [][]float64) float64 {
-	loss := 0.0
-	outputLayer := n.Layers[n.OutputLayer]
-	for y := 0; y < outputLayer.Height; y++ {
-		for x := 0; x < outputLayer.Width; x++ {
-			outputVal := outputLayer.Neurons[y][x].Value
-			targetVal := target[y][x]
-			if outputVal <= 0 {
-				outputVal = 1e-10
-			}
-			loss += -targetVal * math.Log(outputVal)
+// TrainBatch trains the network using mini-batches.
+func (n *Network) TrainBatch(inputs [][][]float64, targets [][][]float64, epochs int, learningRate float64, batchSize int) {
+	for epoch := 0; epoch < epochs; epoch++ {
+		totalLoss := 0.0
+
+		// Shuffle the data.
+		perm := rand.Perm(len(inputs))
+		shuffledInputs := make([][][]float64, len(inputs))
+		shuffledTargets := make([][][]float64, len(targets))
+		for i, p := range perm {
+			shuffledInputs[i] = inputs[p]
+			shuffledTargets[i] = targets[p]
 		}
+
+		// Process the data in batches.
+		for i := 0; i < len(shuffledInputs); i += batchSize {
+			end := i + batchSize
+			if end > len(shuffledInputs) {
+				end = len(shuffledInputs)
+			}
+			batchLoss := 0.0
+			actualBatchSize := float64(end - i)
+
+			// Process each sample in the current batch.
+			// The learning rate is scaled by 1/(batch size) so that the gradient updates are averaged.
+			for j := i; j < end; j++ {
+				n.Forward(shuffledInputs[j])
+				loss := n.ComputeLoss(shuffledTargets[j])
+				if math.IsNaN(loss) {
+					fmt.Printf("NaN loss detected at sample %d, epoch %d\n", j, epoch)
+					continue
+				}
+				batchLoss += loss
+				n.Backward(shuffledTargets[j], learningRate/actualBatchSize)
+			}
+			totalLoss += batchLoss
+		}
+		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
 	}
-	return loss
 }
 
 // AddNeuronsToLayer adds neurons to a specified layer
