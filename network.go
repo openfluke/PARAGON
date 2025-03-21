@@ -294,12 +294,47 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 				localErr := errorTerms[l][y][x]
 
 				if neuron.Dimension != nil {
-					// sub-network final output was subNetOut
-					subNetOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
-						Neurons[0][0].Value
-					fakeTarget := [][]float64{{subNetOut + localErr}}
-					neuron.Dimension.Backward(fakeTarget, lr)
+					// Recompute pre-activation sum
+					sum := neuron.Bias
+					for _, conn := range neuron.Inputs {
+						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+						sum += srcVal * conn.Weight
+					}
+					subNet := neuron.Dimension
+					subInput := [][]float64{{sum}}
+					subNet.Forward(subInput)
+					subOut := subNet.Layers[subNet.OutputLayer].Neurons[0][0].Value
 
+					// Main neuron's activation derivative
+					dNeuronOut_dSubOut := activationDerivative(neuron.Value, neuron.Activation)
+					delta := localErr * dNeuronOut_dSubOut // ∂L/∂(subOut)
+
+					// Backpropagate through sub-network
+					subTargets := [][]float64{{subOut + delta}} // Target adjusts subOut
+					subNet.Backward(subTargets, lr)             // Updates sub-network weights
+
+					// Gradient w.r.t. sub-network input (mySum)
+					subOutputNeuron := subNet.Layers[subNet.OutputLayer].Neurons[0][0]
+					dSubOut_dSum := 0.0
+					for _, conn := range subOutputNeuron.Inputs {
+						//	srcVal := subNet.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+						dSubOut_dSum += conn.Weight * activationDerivative(subOutputNeuron.Value, subOutputNeuron.Activation)
+					}
+
+					// Chain to main neuron
+					subInputError := delta * dSubOut_dSum
+					neuron.Bias += lr * subInputError
+					for i, conn := range neuron.Inputs {
+						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+						gradW := subInputError * srcVal
+						if gradW > 5 {
+							gradW = 5
+						} else if gradW < -5 {
+							gradW = -5
+						}
+						neuron.Inputs[i].Weight += lr * gradW
+						errorTerms[l-1][conn.SourceY][conn.SourceX] += subInputError * conn.Weight
+					}
 				} else {
 					// Normal weight/bias updates
 					neuron.Bias += lr * localErr
