@@ -327,11 +327,11 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 					for i, conn := range neuron.Inputs {
 						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
 						gradW := subInputError * srcVal
-						if gradW > 5 {
+						/*if gradW > 5 {
 							gradW = 5
 						} else if gradW < -5 {
 							gradW = -5
-						}
+						}*/
 						neuron.Inputs[i].Weight += lr * gradW
 						errorTerms[l-1][conn.SourceY][conn.SourceX] += subInputError * conn.Weight
 					}
@@ -342,11 +342,11 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
 						gradW := localErr * srcVal
 						// optional clipping
-						if gradW > 5 {
+						/*if gradW > 5 {
 							gradW = 5
 						} else if gradW < -5 {
 							gradW = -5
-						}
+						}*/
 						neuron.Inputs[i].Weight += lr * gradW
 						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
 					}

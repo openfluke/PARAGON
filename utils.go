@@ -36,3 +36,8 @@ func ArgMax(arr []float64) int {
 	}
 	return maxIdx
 }
+
+// InitializeWeights initializes the weights of the network using the specified method.
+func (n *Network) InitializeWeights(method string) {
+	initializeWeights(n, method)
+}
