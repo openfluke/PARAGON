@@ -540,16 +540,14 @@ func (n *Network) AddLayer(layerIdx int, width, height int, activation string, f
 		fmt.Printf("Added new layer at index %d with dimensions %dx%d\n", layerIdx, width, height)
 	}
 }
-<<<<<<< Updated upstream
-=======
 
 // network.go
-func (n *Network) SetLayerDimension(layerIdx int, subNetwork *Network) {
+/*func (n *Network) SetLayerDimension(layerIdx int, subNetwork *Network) {
 	if layerIdx < 0 || layerIdx >= len(n.Layers) {
 		panic(fmt.Sprintf("invalid layer index: %d", layerIdx))
 	}
 	n.Layers[layerIdx].Dimension = subNetwork
-}
+}*/
 
 func (n *Network) GetOutput() []float64 {
 	outputLayer := n.Layers[n.OutputLayer] // Access the output layer
@@ -559,4 +557,3 @@ func (n *Network) GetOutput() []float64 {
 	}
 	return output
 }
->>>>>>> Stashed changes
