@@ -540,3 +540,23 @@ func (n *Network) AddLayer(layerIdx int, width, height int, activation string, f
 		fmt.Printf("Added new layer at index %d with dimensions %dx%d\n", layerIdx, width, height)
 	}
 }
+<<<<<<< Updated upstream
+=======
+
+// network.go
+func (n *Network) SetLayerDimension(layerIdx int, subNetwork *Network) {
+	if layerIdx < 0 || layerIdx >= len(n.Layers) {
+		panic(fmt.Sprintf("invalid layer index: %d", layerIdx))
+	}
+	n.Layers[layerIdx].Dimension = subNetwork
+}
+
+func (n *Network) GetOutput() []float64 {
+	outputLayer := n.Layers[n.OutputLayer] // Access the output layer
+	output := make([]float64, outputLayer.Width)
+	for x := 0; x < outputLayer.Width; x++ {
+		output[x] = outputLayer.Neurons[0][x].Value // Assuming neurons are stored as [Height][Width]
+	}
+	return output
+}
+>>>>>>> Stashed changes
