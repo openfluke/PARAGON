@@ -142,129 +142,57 @@ func (n *Network) ConnectLayers(fullyConnected []bool) {
 	}
 }
 
-// Forward propagates inputs through the network
+// Forward performs the forward pass through the network
 func (n *Network) Forward(inputs [][]float64) {
+	// Set the input values
 	inputGrid := n.Layers[n.InputLayer]
 	if len(inputs) != inputGrid.Height || len(inputs[0]) != inputGrid.Width {
 		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d",
 			inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
 	}
-
-	// 1) Load the user inputs into the input layer
 	for y := 0; y < inputGrid.Height; y++ {
 		for x := 0; x < inputGrid.Width; x++ {
 			inputGrid.Neurons[y][x].Value = inputs[y][x]
 		}
 	}
 
-	// 2) For each subsequent layer
-	for l := 1; l < len(n.Layers); l++ {
+	// Propagate forward layer by layer
+	for l := 1; l <= n.OutputLayer; l++ {
 		currLayer := n.Layers[l]
-
-		// Precompute partial sums for all neurons in this layer
-		partialSums := make([][]float64, currLayer.Height)
-		for yy := 0; yy < currLayer.Height; yy++ {
-			partialSums[yy] = make([]float64, currLayer.Width)
-			for xx := 0; xx < currLayer.Width; xx++ {
-				neuron := currLayer.Neurons[yy][xx]
-				tempSum := neuron.Bias
-				for _, conn := range neuron.Inputs {
-					srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
-					tempSum += srcVal * conn.Weight
-				}
-				partialSums[yy][xx] = tempSum
-			}
-		}
-
-		// Now finalize each neuron's activation
 		for y := 0; y < currLayer.Height; y++ {
 			for x := 0; x < currLayer.Width; x++ {
 				neuron := currLayer.Neurons[y][x]
-				mySum := partialSums[y][x]
-
-				if neuron.Dimension != nil {
-					//--------------------------------------------------------
-					// We look at the sub-network’s input layer size
-					subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
-					inW := subInLayer.Width
-					inH := subInLayer.Height
-					totalIn := inW * inH
-
-					if totalIn == 1 {
-						//--------------------------------------------------------
-						// CASE A: sub-network expects a single scalar
-						//--------------------------------------------------------
-						subInput := [][]float64{{mySum}}
-						neuron.Dimension.Forward(subInput)
-
-					} else {
-						//--------------------------------------------------------
-						// CASE B: sub-network expects multiple inputs, e.g. 1×16
-						// We'll gather the entire row’s partial sums (y) as a vector.
-						// If the layer is 16 wide, partialSums[y] is length=16.
-						// Then we shape it into [inH][inW].
-						//--------------------------------------------------------
-						rowVec := partialSums[y] // length = currLayer.Width
-
-						if len(rowVec) != totalIn {
-							panic(fmt.Sprintf(
-								"Mismatch: sub-network expects %d inputs, but row has length %d",
-								totalIn, len(rowVec),
-							))
-						}
-
-						// Suppose sub-network is 1×16 => we want subInput = [1][16].
-						if inH == 1 && inW == len(rowVec) {
-							// shape: 1 row, inW columns
-							subInput := make([][]float64, 1)
-							subInput[0] = make([]float64, inW)
-							copy(subInput[0], rowVec)
-
-							// Forward into sub-network
-							neuron.Dimension.Forward(subInput)
-
-						} else if inW == 1 && inH == len(rowVec) {
-							// shape: inH rows, 1 column
-							subInput := make([][]float64, len(rowVec))
-							for i := 0; i < len(rowVec); i++ {
-								subInput[i] = []float64{rowVec[i]}
-							}
-							neuron.Dimension.Forward(subInput)
-
-						} else {
-							panic(fmt.Sprintf("Sub-network input is %dx%d, not matching rowVec style",
-								inW, inH))
-						}
-					}
-
-					// The sub-network's final output is presumably 1×1
-					subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
-						Neurons[0][0].Value
-
-					// Optionally apply the main neuron's activation
-					neuron.Value = applyActivation(subOut, neuron.Activation)
-
-				} else {
-					//--------------------------------------------------------
-					// No sub-network → just do normal activation
-					//--------------------------------------------------------
-					neuron.Value = applyActivation(mySum, neuron.Activation)
+				mySum := neuron.Bias
+				for _, conn := range neuron.Inputs {
+					srcNeuron := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
+					mySum += srcNeuron.Value * conn.Weight
 				}
+				if neuron.Dimension != nil {
+					// Feed the weighted sum into the sub-network
+					subNet := neuron.Dimension
+					subInput := [][]float64{{mySum}}
+					subNet.Forward(subInput)
+					subOut := subNet.Layers[subNet.OutputLayer].Neurons[0][0].Value
+					// Compute modulation gate (sigmoid bounds it between 0 and 1)
+					gate := 1 / (1 + math.Exp(-subOut))
+					// Modulate the weighted sum
+					mySum = mySum * mySum * gate
+				}
+				// Apply activation to the modulated sum
+				neuron.Value = applyActivation(mySum, neuron.Activation)
 			}
 		}
 	}
 
-	// 3) If final layer is softmax, apply it
+	// Apply softmax to the final layer if specified
 	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
 }
 
 // Backward performs backpropagation
-// network.go (partial update)
 func (n *Network) Backward(targets [][]float64, lr float64) {
 	numLayers := len(n.Layers)
-	// Prepare errorTerms for each layer
 	errorTerms := make([][][]float64, numLayers)
 	for l := range n.Layers {
 		errorTerms[l] = make([][]float64, n.Layers[l].Height)
@@ -273,7 +201,7 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 		}
 	}
 
-	// 1) Output layer error
+	// Compute output layer error
 	outL := n.OutputLayer
 	for y := 0; y < n.Layers[outL].Height; y++ {
 		for x := 0; x < n.Layers[outL].Width; x++ {
@@ -283,86 +211,71 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 		}
 	}
 
-	// 2) Propagate backward
+	// Propagate backward
 	for l := outL; l > 0; l-- {
 		currLayer := n.Layers[l]
 		prevLayer := n.Layers[l-1]
-
 		for y := 0; y < currLayer.Height; y++ {
 			for x := 0; x < currLayer.Width; x++ {
 				neuron := currLayer.Neurons[y][x]
 				localErr := errorTerms[l][y][x]
 
 				if neuron.Dimension != nil {
-					// Recompute pre-activation sum
+					subNet := neuron.Dimension
 					sum := neuron.Bias
 					for _, conn := range neuron.Inputs {
 						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
 						sum += srcVal * conn.Weight
 					}
-					subNet := neuron.Dimension
 					subInput := [][]float64{{sum}}
 					subNet.Forward(subInput)
 					subOut := subNet.Layers[subNet.OutputLayer].Neurons[0][0].Value
+					gate := 1 / (1 + math.Exp(-subOut))
 
-					// Main neuron's activation derivative
-					dNeuronOut_dSubOut := activationDerivative(neuron.Value, neuron.Activation)
-					delta := localErr * dNeuronOut_dSubOut // ∂L/∂(subOut)
+					// Gradient w.r.t. the modulated sum
+					dActivation := activationDerivative(neuron.Value, neuron.Activation)
+					dModulated := localErr * dActivation
+
+					// Gradient w.r.t. sum and gate
+					dSum := dModulated * gate
+					dGate := dModulated * sum
+
+					// Gradient w.r.t. subOut (chain rule through sigmoid)
+					dSubOut := dGate * gate * (1 - gate)
+
+					// Regularization to prevent gate from sticking at 0 or 1 (small penalty)
+					regTerm := 0.01 * (gate - 0.5)
+					dSubOut += regTerm
 
 					// Backpropagate through sub-network
-					subTargets := [][]float64{{subOut + delta}} // Target adjusts subOut
-					subNet.Backward(subTargets, lr)             // Updates sub-network weights
+					subTargets := [][]float64{{subOut + lr*dSubOut}}
+					subNet.Backward(subTargets, lr)
 
-					// Gradient w.r.t. sub-network input (mySum)
-					subOutputNeuron := subNet.Layers[subNet.OutputLayer].Neurons[0][0]
-					dSubOut_dSum := 0.0
-					for _, conn := range subOutputNeuron.Inputs {
-						//	srcVal := subNet.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
-						dSubOut_dSum += conn.Weight * activationDerivative(subOutputNeuron.Value, subOutputNeuron.Activation)
-					}
-
-					// Chain to main neuron
-					subInputError := delta * dSubOut_dSum
-					neuron.Bias += lr * subInputError
+					// Update main neuron
+					neuron.Bias += lr * dSum
 					for i, conn := range neuron.Inputs {
 						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
-						gradW := subInputError * srcVal
-						/*if gradW > 5 {
-							gradW = 5
-						} else if gradW < -5 {
-							gradW = -5
-						}*/
+						gradW := dSum * srcVal
 						neuron.Inputs[i].Weight += lr * gradW
-						errorTerms[l-1][conn.SourceY][conn.SourceX] += subInputError * conn.Weight
+						errorTerms[l-1][conn.SourceY][conn.SourceX] += dSum * conn.Weight
 					}
 				} else {
-					// Normal weight/bias updates
+					// Standard backpropagation
 					neuron.Bias += lr * localErr
 					for i, conn := range neuron.Inputs {
 						srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
 						gradW := localErr * srcVal
-						// optional clipping
-						/*if gradW > 5 {
-							gradW = 5
-						} else if gradW < -5 {
-							gradW = -5
-						}*/
 						neuron.Inputs[i].Weight += lr * gradW
 						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
 					}
 				}
 			}
 		}
-
-		// 3) Activation derivatives in the next-lower layer
 		if l-1 > 0 {
 			for yy := 0; yy < prevLayer.Height; yy++ {
 				for xx := 0; xx < prevLayer.Width; xx++ {
 					val := prevLayer.Neurons[yy][xx].Value
-					errorTerms[l-1][yy][xx] *= activationDerivative(
-						val,
-						prevLayer.Neurons[yy][xx].Activation,
-					)
+					errorTerms[l-1][yy][xx] *= activationDerivative(val, prevLayer.Neurons[yy][xx].Activation)
 				}
 			}
 		}
@@ -647,4 +560,76 @@ func (n *Network) AddLayer(layerIdx int, width, height int, activation string, f
 	if n.Debug {
 		fmt.Printf("Added new layer at index %d with dimensions %dx%d\n", layerIdx, width, height)
 	}
+}
+
+func (n *Network) GetLocalConnections(srcLayer, centerX, centerY, size, stride int) []Connection {
+	half := size / 2
+	srcGrid := n.Layers[srcLayer]
+	conns := []Connection{}
+	for dy := -half; dy <= half; dy++ {
+		for dx := -half; dx <= half; dx++ {
+			srcX := centerX*stride + dx
+			srcY := centerY*stride + dy
+			if srcX >= 0 && srcX < srcGrid.Width && srcY >= 0 && srcY < srcGrid.Height {
+				conns = append(conns, Connection{
+					SourceLayer: srcLayer,
+					SourceX:     srcX,
+					SourceY:     srcY,
+					Weight:      rand.NormFloat64() * math.Sqrt(2.0/float64(size*size)),
+				})
+			}
+		}
+	}
+	return conns
+}
+
+func (n *Network) BackwardWithGradient(dOutput [][]float64, lr float64) [][]float64 {
+	// Initialize error terms for each layer
+	errorTerms := make([][][]float64, len(n.Layers))
+	for l := range n.Layers {
+		errorTerms[l] = make([][]float64, n.Layers[l].Height)
+		for y := range errorTerms[l] {
+			errorTerms[l][y] = make([]float64, n.Layers[l].Width)
+		}
+	}
+
+	// Assume dOutput is the gradient w.r.t. the output layer
+	outL := n.OutputLayer // Index of the output layer
+	for y := 0; y < n.Layers[outL].Height; y++ {
+		for x := 0; x < n.Layers[outL].Width; x++ {
+			neuron := n.Layers[outL].Neurons[y][x]
+			dActivation := activationDerivative(neuron.Value, neuron.Activation)
+			errorTerms[outL][y][x] = dOutput[y][x] * dActivation
+		}
+	}
+
+	// Propagate backward through layers
+	for l := outL; l > 0; l-- {
+		currLayer := n.Layers[l]
+		prevLayer := n.Layers[l-1]
+		for y := 0; y < currLayer.Height; y++ {
+			for x := 0; x < currLayer.Width; x++ {
+				neuron := currLayer.Neurons[y][x]
+				localErr := errorTerms[l][y][x]
+				neuron.Bias += lr * localErr
+				for i, conn := range neuron.Inputs {
+					srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
+					gradW := localErr * srcVal
+					neuron.Inputs[i].Weight += lr * gradW
+					errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
+				}
+			}
+		}
+		if l-1 > 0 {
+			for yy := 0; yy < prevLayer.Height; yy++ {
+				for xx := 0; xx < prevLayer.Width; xx++ {
+					val := prevLayer.Neurons[yy][xx].Value
+					errorTerms[l-1][yy][xx] *= activationDerivative(val, prevLayer.Neurons[yy][xx].Activation)
+				}
+			}
+		}
+	}
+
+	// Return gradient w.r.t. input layer
+	return errorTerms[0]
 }
