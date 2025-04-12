@@ -22,6 +22,7 @@ type Neuron struct {
 	Type       string       // e.g., "dense", extensible for future types
 	Inputs     []Connection // Incoming connections
 	IsNew      bool         // Flag for newly added neurons
+	Dimension  *Network
 }
 
 // Connection defines a link from a source neuron

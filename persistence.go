@@ -13,6 +13,9 @@ import (
 type SerializableNeuron struct {
 	Bias    float64   `json:"bias"`
 	Weights []float64 `json:"weights"`
+
+	// NEW FIELD → store any dimension sub‐network here
+	SubNetwork *SerializableNetwork `json:"sub_network,omitempty"`
 }
 
 // SerializableLayer holds serializable layer parameters.
@@ -44,7 +47,7 @@ func (n *Network) toSerializable() SerializableNetwork {
 		Config: n.Config,
 	}
 
-	// Layers
+	// Prepare layers
 	serial.Layers = make([]SerializableLayer, len(n.Layers))
 	for i, layer := range n.Layers {
 		serialLayer := SerializableLayer{
@@ -54,13 +57,24 @@ func (n *Network) toSerializable() SerializableNetwork {
 			serialLayer.Neurons[y] = make([]SerializableNeuron, layer.Width)
 			for x := 0; x < layer.Width; x++ {
 				neuron := layer.Neurons[y][x]
+
+				// Create a serializable object for this neuron
 				serialNeuron := SerializableNeuron{
 					Bias:    neuron.Bias,
 					Weights: make([]float64, len(neuron.Inputs)),
+					// We add SubNetwork below if Dimension != nil
 				}
 				for k := 0; k < len(neuron.Inputs); k++ {
 					serialNeuron.Weights[k] = neuron.Inputs[k].Weight
 				}
+
+				// -------- NEW: Handle sub‐network if present --------
+				if neuron.Dimension != nil {
+					sub := neuron.Dimension.toSerializable()
+					serialNeuron.SubNetwork = &sub
+				}
+				// ----------------------------------------------------
+
 				serialLayer.Neurons[y][x] = serialNeuron
 			}
 		}
@@ -86,66 +100,105 @@ func (n *Network) toSerializable() SerializableNetwork {
 	return serial
 }
 
-// fromSerializable loads parameters from a SerializableNetwork into the Network.
-// Assumes the Network is initialized with the correct architecture.
+// fromSerializable loads parameters from a SerializableNetwork into *n,
+// re-allocating n.Layers (and any sub-network layers) to match the shapes stored in 'serial'.
 func (n *Network) fromSerializable(serial SerializableNetwork) error {
-	// Validate layers
-	if len(serial.Layers) != len(n.Layers) {
-		return fmt.Errorf("layer count mismatch: got %d, expected %d", len(serial.Layers), len(n.Layers))
-	}
-	for i, layer := range n.Layers {
-		serialLayer := serial.Layers[i]
-		if len(serialLayer.Neurons) != layer.Height {
-			return fmt.Errorf("height mismatch in layer %d: got %d, expected %d", i, len(serialLayer.Neurons), layer.Height)
+	// 1) Re-initialize the top-level network layers to match the 'serial' shape
+	n.Layers = make([]Grid, len(serial.Layers))
+	n.OutputLayer = len(serial.Layers) - 1
+	// Prepare each layer with the correct width/height
+	for i, sLay := range serial.Layers {
+		height := len(sLay.Neurons)
+		width := 0
+		if height > 0 {
+			width = len(sLay.Neurons[0]) // number of neurons in row 0
 		}
-		for y := 0; y < layer.Height; y++ {
-			if len(serialLayer.Neurons[y]) != layer.Width {
-				return fmt.Errorf("width mismatch in layer %d, row %d: got %d, expected %d", i, y, len(serialLayer.Neurons[y]), layer.Width)
-			}
-			for x := 0; x < layer.Width; x++ {
-				neuron := layer.Neurons[y][x]
-				serialNeuron := serialLayer.Neurons[y][x]
-				if len(serialNeuron.Weights) != len(neuron.Inputs) {
-					return fmt.Errorf("input count mismatch in layer %d, neuron (%d,%d): got %d, expected %d", i, y, x, len(serialNeuron.Weights), len(neuron.Inputs))
-				}
+		grid := Grid{
+			Width:   width,
+			Height:  height,
+			Neurons: make([][]*Neuron, height),
+		}
+		for y := 0; y < height; y++ {
+			grid.Neurons[y] = make([]*Neuron, width)
+			for x := 0; x < width; x++ {
+				// Create empty neurons for now; we'll set the weights/biases below
+				grid.Neurons[y][x] = &Neuron{}
 			}
 		}
+		n.Layers[i] = grid
 	}
 
-	// Validate attention weights
+	// 2) Initialize attention weights array to match what's in serial.AttnWeights
+	//    (If you're sure it matches, you can skip or just verify the length.)
 	if len(serial.AttnWeights) != len(n.AttnWeights) {
-		return fmt.Errorf("attention weights count mismatch: got %d, expected %d", len(serial.AttnWeights), len(n.AttnWeights))
+		// If your code must handle dynamic changes, do that here; for now, we can just re-alloc or check.
+		n.AttnWeights = make([]AttentionWeights, len(serial.AttnWeights))
 	}
+	n.NHeads = len(serial.AttnWeights) // or set it from serial.Config.NHeads
 
-	// Load layers
-	for i, layer := range n.Layers {
-		serialLayer := serial.Layers[i]
-		for y := 0; y < layer.Height; y++ {
-			for x := 0; x < layer.Width; x++ {
-				neuron := layer.Neurons[y][x]
-				serialNeuron := serialLayer.Neurons[y][x]
-				neuron.Bias = serialNeuron.Bias
-				for k := 0; k < len(neuron.Inputs); k++ {
-					neuron.Inputs[k].Weight = serialNeuron.Weights[k]
-				}
-			}
-		}
-	}
-
-	// Load attention weights
-	for h, attn := range n.AttnWeights {
-		serialAttn := serial.AttnWeights[h]
-		attn.QWeights = serialAttn.QWeights
-		attn.KWeights = serialAttn.KWeights
-		attn.VWeights = serialAttn.VWeights
-	}
-
-	// Load feed-forward parameters
+	// 3) Fill in feed-forward parameters from 'serial'
 	n.FFWeights1 = serial.FFWeights1
 	n.FFBias1 = serial.FFBias1
 	n.FFWeights2 = serial.FFWeights2
 	n.FFBias2 = serial.FFBias2
+	n.Config = serial.Config
+	n.Performance = NewADHDPerformance() // reset or keep existing
 
+	// 4) Now copy over the actual layer data (biases, input weights, sub-networks).
+	for i := 0; i < len(n.Layers); i++ {
+		sLay := serial.Layers[i]
+		if len(sLay.Neurons) != n.Layers[i].Height {
+			return fmt.Errorf("height mismatch in layer %d: got %d, expected %d",
+				i, len(sLay.Neurons), n.Layers[i].Height)
+		}
+
+		for y := 0; y < n.Layers[i].Height; y++ {
+			if len(sLay.Neurons[y]) != n.Layers[i].Width {
+				return fmt.Errorf("width mismatch in layer %d, row %d: got %d, expected %d",
+					i, y, len(sLay.Neurons[y]), n.Layers[i].Width)
+			}
+			for x := 0; x < n.Layers[i].Width; x++ {
+				serialNeuron := sLay.Neurons[y][x]
+				neuron := n.Layers[i].Neurons[y][x]
+
+				// Basic fields
+				neuron.Bias = serialNeuron.Bias
+				neuron.Value = 0.0 // we don't store the forward-pass Value in JSON
+				// For now, Activation, Type, ID, etc. might remain defaults or from the original net
+
+				// Rebuild 'Inputs' slice
+				neuron.Inputs = make([]Connection, len(serialNeuron.Weights))
+				for k := range serialNeuron.Weights {
+					neuron.Inputs[k].Weight = serialNeuron.Weights[k]
+					// We do NOT currently store SourceLayer, SourceX, SourceY in JSON
+					// If you want fully reproducible structure, store them too in the file
+				}
+
+				// Sub-network check
+				if serialNeuron.SubNetwork != nil {
+					// Make a new *Network for dimension
+					subNet := &Network{}
+					if err := subNet.fromSerializable(*serialNeuron.SubNetwork); err != nil {
+						return fmt.Errorf(
+							"failed to load subNetwork at layer %d neuron (%d,%d): %v",
+							i, y, x, err)
+					}
+					neuron.Dimension = subNet
+				} else {
+					neuron.Dimension = nil
+				}
+			}
+		}
+	}
+
+	// 5) Copy attention weights from serial into n.AttnWeights
+	for h := 0; h < len(n.AttnWeights); h++ {
+		n.AttnWeights[h].QWeights = serial.AttnWeights[h].QWeights
+		n.AttnWeights[h].KWeights = serial.AttnWeights[h].KWeights
+		n.AttnWeights[h].VWeights = serial.AttnWeights[h].VWeights
+	}
+
+	// Done!
 	return nil
 }
 

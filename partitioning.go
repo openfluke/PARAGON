@@ -25,7 +25,38 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 						src := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
 						sum += src.Value * conn.Weight
 					}
-					neuron.Value = applyActivation(sum, neuron.Activation)
+					//neuron.Value = applyActivation(sum, neuron.Activation)
+
+					// *** ADDED FOR DIMENSIONAL NEURON ***
+					if neuron.Dimension != nil {
+						// We'll do the same "sub-network" forward logic that you have in Forward()
+						subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
+						inW := subInLayer.Width
+						inH := subInLayer.Height
+						totalIn := inW * inH
+
+						if totalIn == 1 {
+							// single scalar input
+							subInput := [][]float64{{sum}}
+							neuron.Dimension.Forward(subInput)
+							subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
+								Neurons[0][0].Value
+							neuron.Value = applyActivation(subOut, neuron.Activation)
+						} else {
+							// multiple inputs expected by the sub-network
+							// for example, you might treat an entire row’s partial sums, etc.
+							// The exact shape logic depends on how you want to feed it in.
+
+							// Minimal example: if the sub-network is 1×N
+							// you could pass [1][N] or [N][1], etc.
+							// Here’s a quick example if sub-network is 1×1:
+							panic("Sub-network has multi-input shape – handle it like in your Forward() code.")
+						}
+					} else {
+						// normal activation
+						neuron.Value = applyActivation(sum, neuron.Activation)
+					}
+
 					if n.Debug {
 						fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y, neuron.Value)
 					}
@@ -45,7 +76,31 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 							src := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
 							sum += src.Value * conn.Weight
 						}
-						neuron.Value = applyActivation(sum, neuron.Activation)
+						//neuron.Value = applyActivation(sum, neuron.Activation)
+
+						// *** ADDED FOR DIMENSIONAL NEURON ***
+						if neuron.Dimension != nil {
+							// same idea as above
+							subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
+							inW := subInLayer.Width
+							inH := subInLayer.Height
+							totalIn := inW * inH
+
+							if totalIn == 1 {
+								subInput := [][]float64{{sum}}
+								neuron.Dimension.Forward(subInput)
+								subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
+									Neurons[0][0].Value
+								neuron.Value = applyActivation(subOut, neuron.Activation)
+							} else {
+								// if sub-network expects more than 1 input, replicate the logic from your Forward()
+								panic("Sub-network multi-input logic – replicate from your main Forward() code.")
+							}
+						} else {
+							// normal activation
+							neuron.Value = applyActivation(sum, neuron.Activation)
+						}
+
 					} else {
 						layer.Neurons[y][x].Value = 0 // Zero out non-tagged neurons
 					}
@@ -58,6 +113,7 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 		n.ApplySoftmax()
 	}
 }
+
 func (n *Network) BackwardTagged(targets [][]float64, learningRate float64, numTags int, selectedTag int) {
 	numLayers := len(n.Layers)
 	errorTerms := make([][][]float64, numLayers)
