@@ -232,3 +232,72 @@ func ConvertToFloat64(data [][]string) ([][]float64, error) {
 	}
 	return converted, nil
 }
+
+// Padding pads each row in the data to have exactly targetCols columns by appending paddingValue.
+// Rows with more columns than targetCols are truncated to targetCols.
+func Padding(data [][]float64, targetCols int, paddingValue float64) [][]float64 {
+	paddedData := make([][]float64, len(data))
+	for i, row := range data {
+		currentCols := len(row)
+		if currentCols == targetCols {
+			paddedData[i] = row
+		} else if currentCols < targetCols {
+			// Pad with paddingValue if fewer columns
+			padding := make([]float64, targetCols-currentCols)
+			for j := range padding {
+				padding[j] = paddingValue
+			}
+			paddedData[i] = append(row, padding...)
+		} else {
+			// Truncate if more columns
+			paddedData[i] = row[:targetCols]
+		}
+	}
+	return paddedData
+}
+
+// RemoveColumns removes the specified columns from each row of the data.
+func RemoveColumns(data [][]float64, columnsToRemove []int) [][]float64 {
+	// Create a map for quick lookup of columns to remove
+	removeMap := make(map[int]bool)
+	for _, col := range columnsToRemove {
+		removeMap[col] = true
+	}
+
+	// Initialize the result slice with the same number of rows as the input
+	result := make([][]float64, len(data))
+
+	// Process each row
+	for i, row := range data {
+		newRow := []float64{}
+		// Iterate over each column in the row
+		for j, val := range row {
+			// Include the value if its index is not in the remove map
+			if !removeMap[j] {
+				newRow = append(newRow, val)
+			}
+		}
+		result[i] = newRow
+	}
+
+	return result
+}
+
+// SelectColumns creates a new 2D slice containing only the specified columns from each row.
+// If a column index is out of range or negative, it uses "0.0" as the default value.
+// The order of columns in the output matches the order in columnsToKeep.
+func SelectColumns(data [][]float64, columnsToKeep []int) [][]float64 {
+	result := make([][]float64, len(data))
+	for i, row := range data {
+		newRow := make([]float64, len(columnsToKeep))
+		for j, col := range columnsToKeep {
+			if col >= 0 && col < len(row) {
+				newRow[j] = row[col]
+			} else {
+				newRow[j] = 0.0
+			}
+		}
+		result[i] = newRow
+	}
+	return result
+}
