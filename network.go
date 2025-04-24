@@ -357,7 +357,7 @@ func (n *Network) BackwardExternal(
 }
 
 // Train runs the training loop
-func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int, learningRate float64) {
+func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int, learningRate float64, earlyStopOnNegativeLoss bool) {
 	for epoch := 0; epoch < epochs; epoch++ {
 		totalLoss := 0.0
 		perm := rand.Perm(len(inputs))
@@ -373,6 +373,10 @@ func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int,
 			if math.IsNaN(loss) {
 				fmt.Printf("NaN loss detected at sample %d, epoch %d\n", b, epoch)
 				continue
+			}
+			if earlyStopOnNegativeLoss && loss < 0 {
+				fmt.Printf("⚠️ Negative loss (%.4f) detected at sample %d, epoch %d. Stopping training early.\n", loss, b, epoch)
+				return // Stop training for this epoch and exit
 			}
 			totalLoss += loss
 			n.Backward(shuffledTargets[b], learningRate)

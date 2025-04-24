@@ -59,11 +59,16 @@ func NewADHDPerformance() *ADHDPerformance {
 	}
 }
 
-// (n *Network) EvaluatePrediction categorizes an expected vs actual output into an ADHD bucket
+// EvaluatePrediction categorizes an expected vs actual output into an ADHD bucket
 func (n *Network) EvaluatePrediction(expected, actual float64) ADHDResult {
-	deviation := math.Abs((actual - expected) / expected * 100) // % error
-	var bucketName string
+	var deviation float64
+	if math.Abs(expected) < 1e-10 { // Handle near-zero expected values
+		deviation = math.Abs(actual-expected) * 100 // Scale to percentage
+	} else {
+		deviation = math.Abs((actual - expected) / expected * 100) // % error
+	}
 
+	var bucketName string
 	switch {
 	case deviation <= 10:
 		bucketName = "0-10%"
