@@ -215,3 +215,20 @@ func Converter(data [][]string, colsToConvert []int) ([][]string, [][]string, er
 
 	return mapping, newData, nil
 }
+
+// ConvertToFloat64 converts [][]string into [][]float64.
+// It returns an error if any value cannot be parsed.
+func ConvertToFloat64(data [][]string) ([][]float64, error) {
+	converted := make([][]float64, len(data))
+	for i, row := range data {
+		converted[i] = make([]float64, len(row))
+		for j, cell := range row {
+			val, err := strconv.ParseFloat(cell, 64)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert data[%d][%d] = %q to float64: %v", i, j, cell, err)
+			}
+			converted[i][j] = val
+		}
+	}
+	return converted, nil
+}

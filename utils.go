@@ -86,3 +86,19 @@ func ReadCSV(filename string) ([][]string, error) {
 
 	return data, nil
 }
+
+// PadInputToFullSize pads a partial input slice with a given value so it matches the network's full input size.
+// This is useful when only some inputs are available and you want to fill the rest with a default.
+func (n *Network) PadInputToFullSize(partial []float64, fill float64) []float64 {
+	inputLayer := n.Layers[n.InputLayer]
+	totalSize := inputLayer.Width * inputLayer.Height
+
+	result := make([]float64, totalSize)
+	copy(result, partial)
+
+	for i := len(partial); i < totalSize; i++ {
+		result[i] = fill
+	}
+
+	return result
+}
