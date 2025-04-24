@@ -47,6 +47,7 @@ type Network struct {
 	FFBias2     []float64         // [DModel]
 	Config      TransformerConfig // Configuration settings
 	Performance *ADHDPerformance
+	Composite   *CompositePerformance
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
