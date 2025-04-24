@@ -7,7 +7,7 @@ from docx.oxml import OxmlElement
 from docx.shared import RGBColor
 
 # Output Word document name
-OUTPUT_DOC = 'Go_Code_Documentation.docx'
+OUTPUT_DOC = 'paragon_code.docx'
 
 def add_code_paragraph(document, code):
     """

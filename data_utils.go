@@ -2,7 +2,10 @@
 package paragon
 
 import (
+	"fmt"
 	"math/rand"
+	"strconv"
+	"strings"
 )
 
 // SplitDataset takes inputs/targets and splits them into train/validation sets
@@ -33,4 +36,182 @@ func SplitDataset(inputs [][][]float64, targets [][][]float64, trainFrac float64
 		}
 	}
 	return
+}
+
+// Cleaner processes the given data array by cleaning specified columns.
+// For columns in nameCols, automatically detects and removes the common prefix from cube names (e.g., "[ARC]-OC-gen1-v0-POD_192.168.0.227_10023_head" to "head").
+// For columns in paramCols, extracts the value from key:value pairs (e.g., "motor_target_velocity:0" to "0").
+// Returns a new [][]string array with the cleaned data.
+func Cleaner(data [][]string, nameCols, paramCols []int) ([][]string, error) {
+	if len(data) == 0 {
+		return [][]string{}, nil
+	}
+
+	// Create a new array to store the cleaned data
+	cleanedData := make([][]string, len(data))
+	for i := range cleanedData {
+		cleanedData[i] = make([]string, len(data[i]))
+		copy(cleanedData[i], data[i])
+	}
+
+	// Determine the prefix for each name column
+	prefixes := make(map[int]string)
+	for _, col := range nameCols {
+		if col < 0 || col >= len(data[0]) {
+			return nil, fmt.Errorf("invalid name column index %d for row with %d columns", col, len(data[0]))
+		}
+		// Use the first row to determine the prefix
+		if len(data) == 0 {
+			continue
+		}
+		name := data[0][col]
+		// Find the last underscore to determine the prefix
+		lastUnderscore := strings.LastIndex(name, "_")
+		if lastUnderscore == -1 {
+			return nil, fmt.Errorf("no underscore found in name %s in column %d; cannot determine prefix", name, col)
+		}
+		prefix := name[:lastUnderscore+1] // Include the underscore in the prefix
+		prefixes[col] = prefix
+	}
+
+	// Process each row
+	for rowIdx, row := range cleanedData {
+		// Clean cube names in specified columns
+		for _, col := range nameCols {
+			prefix, exists := prefixes[col]
+			if !exists {
+				continue // Skip if no prefix was determined (e.g., empty data)
+			}
+			// Remove the prefix from the cube name
+			cleanedData[rowIdx][col] = strings.TrimPrefix(row[col], prefix)
+		}
+
+		// Clean joint parameters in specified columns
+		for _, col := range paramCols {
+			if col < 0 || col >= len(row) {
+				return nil, fmt.Errorf("invalid param column index %d for row with %d columns", col, len(row))
+			}
+			// Split the parameter on ":" and take the value part
+			parts := strings.Split(row[col], ":")
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid joint parameter format in row %d, column %d: %s", rowIdx, col, row[col])
+			}
+			cleanedData[rowIdx][col] = parts[1]
+		}
+	}
+
+	return cleanedData, nil
+}
+
+// PrintTable prints the given data array in a table-like format with aligned columns.
+func PrintTable(data [][]string) {
+	if len(data) == 0 {
+		fmt.Println("No data to display.")
+		return
+	}
+
+	// Determine the number of columns
+	numCols := len(data[0])
+
+	// Calculate the maximum width for each column
+	colWidths := make([]int, numCols)
+	for _, row := range data {
+		if len(row) != numCols {
+			fmt.Println("Inconsistent number of columns in data; cannot print table.")
+			return
+		}
+		for j, cell := range row {
+			if len(cell) > colWidths[j] {
+				colWidths[j] = len(cell)
+			}
+		}
+	}
+
+	// Calculate the total width of the table (including padding and borders)
+	totalWidth := 0
+	for _, width := range colWidths {
+		totalWidth += width + 3 // 2 spaces padding + 1 for the border
+	}
+	totalWidth += 1 // Final border
+
+	// Print the top border
+	fmt.Println(strings.Repeat("-", totalWidth))
+
+	// Print each row
+	for _, row := range data {
+		fmt.Print("|")
+		for j, cell := range row {
+			// Pad the cell to the column width
+			padding := colWidths[j] - len(cell)
+			fmt.Printf(" %s%s |", cell, strings.Repeat(" ", padding))
+		}
+		fmt.Println()
+	}
+
+	// Print the bottom border
+	fmt.Println(strings.Repeat("-", totalWidth))
+}
+
+// Converter maps unique strings in specified columns to integers and replaces them in the data.
+// Returns the mapping as [][2]string (e.g., [["head", "0"], ["body", "1"]]) and the new data with integers.
+func Converter(data [][]string, colsToConvert []int) ([][]string, [][]string, error) {
+	if len(data) == 0 {
+		return [][]string{}, [][]string{}, nil
+	}
+
+	// Validate column indices
+	numCols := len(data[0])
+	for _, col := range colsToConvert {
+		if col < 0 || col >= numCols {
+			return nil, nil, fmt.Errorf("invalid column index %d for data with %d columns", col, numCols)
+		}
+	}
+
+	// Collect unique strings from specified columns
+	uniqueStrings := make(map[string]bool)
+	for _, row := range data {
+		if len(row) != numCols {
+			return nil, nil, fmt.Errorf("inconsistent number of columns in row: expected %d, got %d", numCols, len(row))
+		}
+		for _, col := range colsToConvert {
+			uniqueStrings[row[col]] = true
+		}
+	}
+
+	// Create a mapping of unique strings to integers
+	stringToInt := make(map[string]int)
+	intToString := make(map[int]string)
+	uniqueList := make([]string, 0, len(uniqueStrings))
+	for s := range uniqueStrings {
+		uniqueList = append(uniqueList, s)
+	}
+	// Sort the list for consistent ordering (optional, but ensures reproducibility)
+	for i, s := range uniqueList {
+		stringToInt[s] = i
+		intToString[i] = s
+	}
+
+	// Create the mapping array
+	mapping := make([][]string, len(uniqueList))
+	for i, s := range uniqueList {
+		mapping[i] = []string{s, strconv.Itoa(i)}
+	}
+
+	// Create a new data array with replaced values
+	newData := make([][]string, len(data))
+	for i := range newData {
+		newData[i] = make([]string, len(data[i]))
+		copy(newData[i], data[i])
+	}
+
+	// Replace strings with their integer mappings in specified columns
+	for rowIdx, row := range newData {
+		for _, col := range colsToConvert {
+			value := row[col]
+			intValue := stringToInt[value]
+			newData[rowIdx][col] = strconv.Itoa(intValue)
+		}
+	}
+
+	return mapping, newData, nil
 }
