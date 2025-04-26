@@ -68,7 +68,7 @@ func (n *Network) PartitionNASLayerWiseGrowing(inputs [][][]float64, targets [][
 	return nil
 }
 
-// NormalNASLayerWiseGrowingEnhanced performs NAS by cloning the network via JSON,
+// InitNAS performs NAS by cloning the network via JSON,
 // applying richer mutations (architecture + weight perturbations),
 // training, and selecting the best.
 //
@@ -77,7 +77,7 @@ func (n *Network) PartitionNASLayerWiseGrowing(inputs [][][]float64, targets [][
 // - lr:       base learning rate
 // - inputs, targets: data for train+eval
 // - earlyStop: whether to stop epochs early on negative loss
-func (n *Network) NormalNASLayerWiseGrowingEnhanced(
+func (n *Network) InitNAS(
 	numClones, epochs int,
 	baseLR, weightMutRate float64,
 	inputs, targets [][][]float64,
@@ -197,7 +197,7 @@ func perturbWeights(n *Network, rate float64, seed int) {
 // IterativeNAS runs multiple rounds of NormalNASLayerWiseGrowingEnhanced on a network,
 // stopping early if the target ADHD score is reached.
 // Returns the best‐found network and its ADHD score.
-func (n *Network) IterativeNAS(
+func (n *Network) IterativeInitNAS(
 	numClones, nasEpochs int,
 	baseLR, weightMutationRate float64,
 	earlyStop, enableActMutation bool,
@@ -214,7 +214,7 @@ func (n *Network) IterativeNAS(
 			attempt, maxAttempts, parentScore,
 		)
 
-		candNet, candScore, improved, err := parentNet.NormalNASLayerWiseGrowingEnhanced(
+		candNet, candScore, improved, err := parentNet.InitNAS(
 			numClones,
 			nasEpochs,
 			baseLR,
