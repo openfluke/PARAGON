@@ -23,6 +23,7 @@ type Neuron struct {
 	Inputs     []Connection // Incoming connections
 	IsNew      bool         // Flag for newly added neurons
 	Dimension  *Network
+	RevValue   float64
 }
 
 // Connection defines a link from a source neuron
