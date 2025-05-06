@@ -347,3 +347,147 @@ func (n *Network) ReverseInferFromOutputWithTrace(output [][]float64) {
 		}
 	}
 }
+
+func (n *Network) InferInputFromOutput(targetOutput [][]float64, steps int, lr float64) [][]float64 {
+	inputLayer := n.Layers[n.InputLayer]
+	height := inputLayer.Height
+	width := inputLayer.Width
+
+	// Initialize input with neutral starting values
+	input := make([][]float64, height)
+	for y := range input {
+		input[y] = make([]float64, width)
+		for x := range input[y] {
+			input[y][x] = 0.5 // midpoint gray
+		}
+	}
+
+	for step := 0; step < steps; step++ {
+		// Step 1: Forward with current input guess
+		n.Forward(input)
+
+		// Step 2: Allocate error term map
+		errorTerms := make([][][]float64, len(n.Layers))
+		for l := range n.Layers {
+			errorTerms[l] = make([][]float64, n.Layers[l].Height)
+			for y := range errorTerms[l] {
+				errorTerms[l][y] = make([]float64, n.Layers[l].Width)
+			}
+		}
+
+		// Step 3: Output layer error
+		outputLayer := n.Layers[n.OutputLayer]
+		for y := 0; y < outputLayer.Height; y++ {
+			for x := 0; x < outputLayer.Width; x++ {
+				neuron := outputLayer.Neurons[y][x]
+				errorTerms[n.OutputLayer][y][x] =
+					(targetOutput[y][x] - neuron.Value) *
+						activationDerivative(neuron.Value, neuron.Activation)
+			}
+		}
+
+		// Step 4: Backpropagate errors down to input layer
+		for l := n.OutputLayer; l > 0; l-- {
+			currLayer := n.Layers[l]
+			prevLayer := n.Layers[l-1]
+
+			for y := 0; y < currLayer.Height; y++ {
+				for x := 0; x < currLayer.Width; x++ {
+					neuron := currLayer.Neurons[y][x]
+					localErr := errorTerms[l][y][x]
+
+					for _, conn := range neuron.Inputs {
+						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
+					}
+				}
+			}
+
+			// At input layer, apply gradient step to the synthetic input
+			if l-1 == n.InputLayer {
+				for y := 0; y < prevLayer.Height; y++ {
+					for x := 0; x < prevLayer.Width; x++ {
+						grad := errorTerms[l-1][y][x] *
+							activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
+						input[y][x] += lr * grad
+
+						// Clamp input to visible range
+						if input[y][x] < 0 {
+							input[y][x] = 0
+						} else if input[y][x] > 1 {
+							input[y][x] = 1
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	return input
+}
+
+func (n *Network) BackwardFromOutput(targetOutput [][]float64) [][]float64 {
+	// Step 1: Set output layer directly
+	outputLayer := n.Layers[n.OutputLayer]
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			outputLayer.Neurons[y][x].Value = targetOutput[y][x]
+		}
+	}
+
+	// Step 2: Walk backward through layers
+	for layerIndex := n.OutputLayer; layerIndex > n.InputLayer; layerIndex-- {
+		currLayer := n.Layers[layerIndex]
+		prevLayer := n.Layers[layerIndex-1]
+
+		for y := 0; y < prevLayer.Height; y++ {
+			for x := 0; x < prevLayer.Width; x++ {
+				var sum float64
+				var count int
+
+				for cy := 0; cy < currLayer.Height; cy++ {
+					for cx := 0; cx < currLayer.Width; cx++ {
+						neuron := currLayer.Neurons[cy][cx]
+
+						for _, conn := range neuron.Inputs {
+							if conn.SourceLayer == layerIndex-1 &&
+								conn.SourceY == y &&
+								conn.SourceX == x &&
+								conn.Weight != 0 {
+
+								approx := (neuron.Value - neuron.Bias) / conn.Weight
+
+								// Reverse-apply inverse activation
+								if neuron.Activation == "leaky_relu" {
+									if approx < 0 {
+										approx *= 100.0 // Invert leaky slope of 0.01
+									}
+								}
+								// Add more inverse activations as needed
+
+								sum += approx
+								count++
+							}
+						}
+					}
+				}
+
+				if count > 0 {
+					prevLayer.Neurons[y][x].Value = sum / float64(count)
+				}
+			}
+		}
+	}
+
+	// Step 3: Extract the inferred input
+	inputLayer := n.Layers[n.InputLayer]
+	inferred := make([][]float64, inputLayer.Height)
+	for y := 0; y < inputLayer.Height; y++ {
+		inferred[y] = make([]float64, inputLayer.Width)
+		for x := 0; x < inputLayer.Width; x++ {
+			inferred[y][x] = inputLayer.Neurons[y][x].Value
+		}
+	}
+
+	return inferred
+}
