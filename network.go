@@ -11,6 +11,11 @@ type Grid struct {
 	Width   int         // Number of neurons along x-axis
 	Height  int         // Number of neurons along y-axis
 	Neurons [][]*Neuron // 2D slice of neuron pointers
+
+	// Replay settings
+	ReplayOffset int    // e.g., -2
+	MaxReplay    int    // e.g., 1
+	ReplayPhase  string // "before" or "after"
 }
 
 // Neuron represents a single unit in the grid
@@ -144,8 +149,9 @@ func (n *Network) ConnectLayers(fullyConnected []bool) {
 	}
 }
 
-// Forward propagates inputs through the network
 func (n *Network) Forward(inputs [][]float64) {
+	replayTracker := map[int]int{} // Reset per-sample
+
 	inputGrid := n.Layers[n.InputLayer]
 	if len(inputs) != inputGrid.Height || len(inputs[0]) != inputGrid.Width {
 		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d", inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
@@ -155,33 +161,70 @@ func (n *Network) Forward(inputs [][]float64) {
 			inputGrid.Neurons[y][x].Value = inputs[y][x]
 		}
 	}
+
 	for l := 1; l < len(n.Layers); l++ {
-		currLayer := n.Layers[l]
-		for y := 0; y < currLayer.Height; y++ {
-			for x := 0; x < currLayer.Width; x++ {
-				neuron := currLayer.Neurons[y][x]
-				sum := neuron.Bias
-				for _, conn := range neuron.Inputs {
-					srcNeuron := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
-					sum += srcNeuron.Value * conn.Weight
+		layer := &n.Layers[l]
+
+		// --- Replay Before ---
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "before" && replayTracker[l] < layer.MaxReplay {
+			target := l + layer.ReplayOffset
+			if target <= n.InputLayer {
+				target = n.InputLayer + 1 // NEVER replay input
+			}
+			if target >= 0 && target < len(n.Layers) {
+				for i := target; i <= l; i++ {
+					n.forwardLayer(i)
 				}
-				neuron.Value = applyActivation(sum, neuron.Activation)
-				if n.Debug {
-					fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y, neuron.Value)
+				replayTracker[l]++
+			}
+		}
+
+		n.forwardLayer(l)
+
+		// --- Replay After ---
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "after" && replayTracker[l] < layer.MaxReplay {
+			target := l + layer.ReplayOffset
+			if target <= n.InputLayer {
+				target = n.InputLayer + 1
+			}
+			if target >= 0 && target < len(n.Layers) {
+				for i := target; i <= l; i++ {
+					n.forwardLayer(i)
 				}
+				replayTracker[l]++
 			}
 		}
 	}
+
 	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
 }
 
-// Backward performs backpropagation
-// network.go (partial update)
+// Helper
+func (n *Network) forwardLayer(l int) {
+	currLayer := n.Layers[l]
+	for y := 0; y < currLayer.Height; y++ {
+		for x := 0; x < currLayer.Width; x++ {
+			neuron := currLayer.Neurons[y][x]
+			sum := neuron.Bias
+			for _, conn := range neuron.Inputs {
+				src := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
+				sum += src.Value * conn.Weight
+			}
+			neuron.Value = applyActivation(sum, neuron.Activation)
+			if n.Debug {
+				fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y, neuron.Value)
+			}
+		}
+	}
+}
+
 func (n *Network) Backward(targets [][]float64, learningRate float64) {
 	numLayers := len(n.Layers)
 	errorTerms := make([][][]float64, numLayers)
+	replayTracker := map[int]int{}
+
 	for l := range n.Layers {
 		errorTerms[l] = make([][]float64, n.Layers[l].Height)
 		for y := range errorTerms[l] {
@@ -189,7 +232,6 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	// Compute error at the output layer.
 	outputLayer := n.Layers[n.OutputLayer]
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
@@ -198,91 +240,69 @@ func (n *Network) Backward(targets [][]float64, learningRate float64) {
 		}
 	}
 
-	// Example: For any attention-gradient computations,
-	// use the final hidden layer (index numLayers-2) instead of a fixed index.
-	var attnGradients [][][]float64
-	if n.NHeads > 0 && len(n.AttnWeights) > 0 {
-		finalHiddenLayer := n.Layers[numLayers-2]
-		headSize := finalHiddenLayer.Width / n.NHeads
-		attnGradients = make([][][]float64, n.NHeads)
-		for h := 0; h < n.NHeads; h++ {
-			attnGradients[h] = make([][]float64, finalHiddenLayer.Height)
-			for y := 0; y < finalHiddenLayer.Height; y++ {
-				attnGradients[h][y] = make([]float64, headSize)
-				start := h * headSize
-				for x := 0; x < headSize; x++ {
-					// Adjust this based on how you want to compute gradients.
-					attnGradients[h][y][x] = errorTerms[numLayers-2][y][start+x]
+	for l := n.OutputLayer; l > 0; l-- {
+		layer := &n.Layers[l]
+
+		// --- Replay Before ---
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "before" && replayTracker[l] < layer.MaxReplay {
+			target := l + layer.ReplayOffset
+			if target <= n.InputLayer {
+				target = n.InputLayer + 1
+			}
+			if target > 0 && target < len(n.Layers) {
+				for i := l; i >= target; i-- {
+					n.backwardLayer(i, errorTerms, learningRate)
+				}
+				replayTracker[l]++
+			}
+		}
+
+		n.backwardLayer(l, errorTerms, learningRate)
+
+		// --- Replay After ---
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "after" && replayTracker[l] < layer.MaxReplay {
+			target := l + layer.ReplayOffset
+			if target <= n.InputLayer {
+				target = n.InputLayer + 1
+			}
+			if target > 0 && target < len(n.Layers) {
+				for i := l; i >= target; i-- {
+					n.backwardLayer(i, errorTerms, learningRate)
+				}
+				replayTracker[l]++
+			}
+		}
+	}
+}
+
+// Helper
+func (n *Network) backwardLayer(l int, errorTerms [][][]float64, learningRate float64) {
+	currLayer := n.Layers[l]
+	prevLayer := n.Layers[l-1]
+	for y := 0; y < currLayer.Height; y++ {
+		for x := 0; x < currLayer.Width; x++ {
+			neuron := currLayer.Neurons[y][x]
+			localErr := errorTerms[l][y][x]
+			neuron.Bias += learningRate * localErr
+			for i, conn := range neuron.Inputs {
+				src := prevLayer.Neurons[conn.SourceY][conn.SourceX]
+				gradW := localErr * src.Value
+				if gradW > 5.0 {
+					gradW = 5.0
+				} else if gradW < -5.0 {
+					gradW = -5.0
+				}
+				neuron.Inputs[i].Weight += learningRate * gradW
+				if l-1 > 0 {
+					errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
 				}
 			}
 		}
 	}
-
-	// Backpropagate through layers from output down to input.
-	for l := n.OutputLayer; l > 0; l-- {
-		currLayer := n.Layers[l]
-		prevLayer := n.Layers[l-1]
-		for y := 0; y < currLayer.Height; y++ {
-			for x := 0; x < currLayer.Width; x++ {
-				neuron := currLayer.Neurons[y][x]
-				localErr := errorTerms[l][y][x]
-				neuron.Bias += learningRate * localErr
-				for i, conn := range neuron.Inputs {
-					srcNeuron := prevLayer.Neurons[conn.SourceY][conn.SourceX]
-					gradW := localErr * srcNeuron.Value
-					if gradW > 5.0 {
-						gradW = 5.0
-					} else if gradW < -5.0 {
-						gradW = -5.0
-					}
-					neuron.Inputs[i].Weight += learningRate * gradW
-					if l-1 > 0 {
-						errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
-					}
-				}
-			}
-		}
-		if l-1 > 0 {
-			for y := 0; y < prevLayer.Height; y++ {
-				for x := 0; x < prevLayer.Width; x++ {
-					errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
-				}
-			}
-			// If using attention, update attention weights using the final hidden layer.
-			if n.NHeads > 0 && len(n.AttnWeights) > 0 {
-				finalHiddenLayer := n.Layers[numLayers-2]
-				headSize := finalHiddenLayer.Width / n.NHeads
-				for h := 0; h < n.NHeads; h++ {
-					for i := 0; i < finalHiddenLayer.Width; i++ {
-						for j := 0; j < headSize; j++ {
-							gradientQ, gradientK, gradientV := 0.0, 0.0, 0.0
-							for y := 0; y < finalHiddenLayer.Height; y++ {
-								gradientQ += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-								gradientK += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-								gradientV += attnGradients[h][y][j] * finalHiddenLayer.Neurons[y][i].Value
-							}
-							// Apply gradient clipping.
-							if gradientQ > 5.0 {
-								gradientQ = 5.0
-							} else if gradientQ < -5.0 {
-								gradientQ = -5.0
-							}
-							if gradientK > 5.0 {
-								gradientK = 5.0
-							} else if gradientK < -5.0 {
-								gradientK = -5.0
-							}
-							if gradientV > 5.0 {
-								gradientV = 5.0
-							} else if gradientV < -5.0 {
-								gradientV = -5.0
-							}
-							n.AttnWeights[h].QWeights[i][j] += learningRate * gradientQ
-							n.AttnWeights[h].KWeights[i][j] += learningRate * gradientK
-							n.AttnWeights[h].VWeights[i][j] += learningRate * gradientV
-						}
-					}
-				}
+	if l-1 > 0 {
+		for y := 0; y < prevLayer.Height; y++ {
+			for x := 0; x < prevLayer.Width; x++ {
+				errorTerms[l-1][y][x] *= activationDerivative(prevLayer.Neurons[y][x].Value, prevLayer.Neurons[y][x].Activation)
 			}
 		}
 	}
