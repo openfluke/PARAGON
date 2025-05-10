@@ -143,3 +143,18 @@ func (n *Network) LoadJSON(path string) error {
 	}
 	return n.fromS(s)
 }
+
+// MarshalJSONModel returns the model as a JSON byte‑slice in the same
+// loss‑less format SaveJSON uses (handy for in‑memory cloning).
+func (n *Network) MarshalJSONModel() ([]byte, error) {
+	return json.Marshal(n.toS())
+}
+
+// UnmarshalJSONModel overwrites *n with data produced by MarshalJSONModel.
+func (n *Network) UnmarshalJSONModel(b []byte) error {
+	var sn sNet
+	if err := json.Unmarshal(b, &sn); err != nil {
+		return err
+	}
+	return n.fromS(sn)
+}
