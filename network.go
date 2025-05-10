@@ -15,6 +15,15 @@ type Grid struct {
 	ReplayOffset int    // Offset to replay (e.g., -1 to replay previous layer)
 	ReplayPhase  string // "before" or "after" to determine when to replay
 	MaxReplay    int    // Maximum number of replays for this layer
+
+	//dynamic replay
+	ReplayEnabled    bool                            // Manual switch
+	ReplayBudget     int                             // Max allowed replays
+	ReplayGateFunc   func(input [][]float64) float64 // Output: [0.0–1.0]
+	ReplayGateToReps func(score float64) int         // Maps score to actual replays
+
+	CachedOutputs []float64 // used for entropy-based replay gating
+
 }
 
 // Neuron represents a single unit in the grid
@@ -53,6 +62,8 @@ type Network struct {
 	Config      TransformerConfig // Configuration settings
 	Performance *ADHDPerformance
 	Composite   *CompositePerformance
+	ReplayStats map[int][]int // layer index -> []replay count per sample
+
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -66,6 +77,7 @@ func NewNetwork(layerSizes []struct{ Width, Height int }, activations []string, 
 		OutputLayer: len(layerSizes) - 1,
 		NHeads:      0, // Default to 0, set by NewTransformerEncoder if needed
 		Performance: NewADHDPerformance(),
+		ReplayStats: make(map[int][]int),
 	}
 	idCounter := 0
 	for i, size := range layerSizes {
@@ -248,6 +260,7 @@ func (n *Network) Forward(inputs [][]float64) {
 			if start >= 1 && start <= l {
 				for i := start; i <= l; i++ {
 					n.forwardLayer(i)
+					n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
 				}
 				replayed[l]++
 			}
@@ -255,6 +268,7 @@ func (n *Network) Forward(inputs [][]float64) {
 
 		// ► normal computation -------------------------------------------------
 		n.forwardLayer(l)
+		layer.CachedOutputs = layer.GetOutputValues()
 
 		// ► replay “after” -----------------------------------------------------
 		if layer.ReplayOffset != 0 &&
@@ -268,7 +282,28 @@ func (n *Network) Forward(inputs [][]float64) {
 			if start >= 1 && start <= l {
 				for i := start; i <= l; i++ {
 					n.forwardLayer(i)
+					n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
 				}
+				replayed[l]++
+			}
+		}
+
+		// ► dynamic gated replay -----------------------------------------------
+		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
+			score := layer.ReplayGateFunc(nil)
+			nreps := layer.ReplayBudget
+			if layer.ReplayGateToReps != nil {
+				nreps = layer.ReplayGateToReps(score)
+			}
+			if nreps > layer.ReplayBudget {
+				nreps = layer.ReplayBudget
+			}
+
+			//fmt.Printf("[ReplayGate] Layer %d → Entropy %.4f → Replays %d\n", l, score, nreps)
+
+			for i := 0; i < nreps; i++ {
+				n.forwardLayer(l)
+				layer.CachedOutputs = layer.GetOutputValues()
 				replayed[l]++
 			}
 		}
@@ -285,8 +320,6 @@ func (n *Network) Forward(inputs [][]float64) {
 // ---------------------------------------------------------------------------
 func (n *Network) Backward(targets [][]float64, lr float64) {
 	nLayers := len(n.Layers)
-
-	// error tensor -----------------------------------------------------------
 	err := make([][][]float64, nLayers)
 	for l := range err {
 		err[l] = make([][]float64, n.Layers[l].Height)
@@ -295,7 +328,7 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 		}
 	}
 
-	// output layer error -----------------------------------------------------
+	// Output error
 	out := n.Layers[n.OutputLayer]
 	for y := 0; y < out.Height; y++ {
 		for x := 0; x < out.Width; x++ {
@@ -306,131 +339,58 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 		}
 	}
 
-	// for optional attention gradient bookkeeping ----------------------------
-	var attnGrad [][][]float64
-	if n.NHeads > 0 && len(n.AttnWeights) > 0 {
-		hid := n.Layers[nLayers-2]
-		size := hid.Width / n.NHeads
-		attnGrad = make([][][]float64, n.NHeads)
-		for h := 0; h < n.NHeads; h++ {
-			attnGrad[h] = make([][]float64, hid.Height)
-			for y := 0; y < hid.Height; y++ {
-				attnGrad[h][y] = make([]float64, size)
-			}
-		}
-	}
+	replayed := map[int]int{}
 
-	replayed := map[int]int{} // counter per layer
-
-	// walk backwards ---------------------------------------------------------
 	for l := n.OutputLayer; l > 0; l-- {
 		layer := &n.Layers[l]
 
-		// ► replay “before” ----------------------------------------------------
+		// Manual Replay — before
 		if layer.ReplayOffset != 0 &&
 			layer.ReplayPhase == "before" &&
 			replayed[l] < layer.MaxReplay {
 
-			stop := l + layer.ReplayOffset
-			if stop <= n.InputLayer {
-				stop = n.InputLayer + 1
+			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
+			for i := l; i >= stop; i-- {
+				n.backwardLayer(i, err, lr)
 			}
-			if stop >= 1 && stop <= l {
-				for i := l; i >= stop; i-- {
-					n.backwardLayer(i, err, lr)
-				}
-				replayed[l]++
-			}
+			replayed[l]++
 		}
 
-		// ► normal back‑prop for this layer ------------------------------------
+		// Normal back-prop
 		n.backwardLayer(l, err, lr)
 
-		// ► replay “after” -----------------------------------------------------
+		// Manual Replay — after
 		if layer.ReplayOffset != 0 &&
 			layer.ReplayPhase == "after" &&
 			replayed[l] < layer.MaxReplay {
 
-			stop := l + layer.ReplayOffset
-			if stop <= n.InputLayer {
-				stop = n.InputLayer + 1
+			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
+			for i := l; i >= stop; i-- {
+				n.backwardLayer(i, err, lr)
 			}
-			if stop >= 1 && stop <= l {
-				for i := l; i >= stop; i-- {
-					n.backwardLayer(i, err, lr)
-				}
+			replayed[l]++
+		}
+
+		// Dynamic Gated Replay — only if enabled
+		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
+			score := layer.ReplayGateFunc(nil)
+			nreps := layer.ReplayBudget
+			if layer.ReplayGateToReps != nil {
+				nreps = layer.ReplayGateToReps(score)
+			}
+			if nreps > layer.ReplayBudget {
+				nreps = layer.ReplayBudget
+			}
+
+			for i := 0; i < nreps; i++ {
+				n.backwardLayer(l, err, lr)
 				replayed[l]++
 			}
-		}
-	}
-}
 
-// BackwardExternal receives final-layer partial derivatives ∂L/∂(output)
-// directly from your training code. No MSE logic inside.
-func (n *Network) BackwardExternal(
-	gradOutput [][]float64, // shape [height][width] for the final layer
-	learningRate float64,
-) {
-	errorTerms := make([][][]float64, len(n.Layers))
-	for l := range n.Layers {
-		errorTerms[l] = make([][]float64, n.Layers[l].Height)
-		for y := range errorTerms[l] {
-			errorTerms[l][y] = make([]float64, n.Layers[l].Width)
-		}
-	}
-
-	// 1) Final layer: combine gradOutput with derivative of activation
-	outL := n.OutputLayer
-	outputLayer := n.Layers[outL]
-	for y := 0; y < outputLayer.Height; y++ {
-		for x := 0; x < outputLayer.Width; x++ {
-			neuron := outputLayer.Neurons[y][x]
-			dOut_dZ := activationDerivative(neuron.Value, neuron.Activation)
-			// gradOutput[y][x] = ∂L/∂(neuron_output)
-			errorTerms[outL][y][x] = gradOutput[y][x] * dOut_dZ
-		}
-	}
-
-	// 2) Backpropagate through hidden layers
-	for l := n.OutputLayer; l > 0; l-- {
-		currLayer := n.Layers[l]
-		prevLayer := n.Layers[l-1]
-		for y := 0; y < currLayer.Height; y++ {
-			for x := 0; x < currLayer.Width; x++ {
-				neuron := currLayer.Neurons[y][x]
-				localErr := errorTerms[l][y][x]
-
-				// Update bias
-				neuron.Bias -= learningRate * localErr
-
-				// Update weights
-				for i, conn := range neuron.Inputs {
-					srcVal := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX].Value
-					gradW := localErr * srcVal
-					// optional gradient clipping
-					if gradW > 5.0 {
-						gradW = 5.0
-					} else if gradW < -5.0 {
-						gradW = -5.0
-					}
-					neuron.Inputs[i].Weight -= learningRate * gradW
-
-					// Accumulate chain rule for next backprop stage
-					errorTerms[l-1][conn.SourceY][conn.SourceX] += localErr * conn.Weight
-				}
+			// ✅ Log actual dynamic replays for this sample+layer
+			if n.ReplayStats != nil {
+				n.LogReplay(l, nreps)
 			}
-		}
-
-		// Activation derivative for the next layer down
-		if l-1 > 0 {
-			for y := 0; y < prevLayer.Height; y++ {
-				for x := 0; x < prevLayer.Width; x++ {
-					val := prevLayer.Neurons[y][x].Value
-					errorTerms[l-1][y][x] *= activationDerivative(val, prevLayer.Neurons[y][x].Activation)
-				}
-			}
-			// If you want to handle attention gradients, do them here
-			// (similar to your existing code, but with correct chain rule).
 		}
 	}
 }
@@ -462,6 +422,107 @@ func (n *Network) Train(inputs [][][]float64, targets [][][]float64, epochs int,
 		}
 		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
 	}
+}
+
+func (n *Network) TrainTest(inputs [][][]float64, targets [][][]float64, epochs int, learningRate float64, earlyStopOnNegativeLoss bool) {
+	const lambda = 0.01 // 💡 scaling factor for replay penalty
+
+	for epoch := 0; epoch < epochs; epoch++ {
+		totalLoss := 0.0
+		perm := rand.Perm(len(inputs))
+		shuffledInputs := make([][][]float64, len(inputs))
+		shuffledTargets := make([][][]float64, len(targets))
+		for i, p := range perm {
+			shuffledInputs[i] = inputs[p]
+			shuffledTargets[i] = targets[p]
+		}
+
+		for b := 0; b < len(shuffledInputs); b++ {
+			n.ResetReplayStats()
+
+			// 🔁 Forward pass
+			n.Forward(shuffledInputs[b])
+
+			// 🎯 Base loss
+			loss := n.ComputeLoss(shuffledTargets[b])
+
+			// 📊 Penalty = λ * total replays * (1 - avg entropy)
+			totalReplays := n.TotalReplayThisSample()
+			avgEntropy := n.AvgEntropyThisSample()
+			penalty := lambda * float64(totalReplays) * (1.0 - avgEntropy)
+			loss += penalty
+
+			if math.IsNaN(loss) {
+				fmt.Printf("NaN loss detected at sample %d, epoch %d\n", b, epoch)
+				continue
+			}
+			if earlyStopOnNegativeLoss && loss < 0 {
+				fmt.Printf("⚠️  Negative loss (%.4f) at sample %d, epoch %d. Early stopping.\n", loss, b, epoch)
+				return
+			}
+
+			totalLoss += loss
+
+			// 🔁 Backward
+			n.Backward(shuffledTargets[b], learningRate)
+		}
+
+		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
+	}
+}
+
+func (n *Network) AvgEntropyThisSample() float64 {
+	totalEntropy := 0.0
+	num := 0
+	for _, layer := range n.Layers {
+		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
+			score := layer.ReplayGateFunc(nil)
+			totalEntropy += score
+			num++
+		}
+	}
+	if num == 0 {
+		return 0.0
+	}
+	return totalEntropy / float64(num)
+}
+
+func (n *Network) TrainTestWithLambda(
+	inputs, targets [][][]float64,
+	epochs int,
+	learningRate float64,
+	earlyStopOnNegativeLoss bool,
+	lambda float64,
+) {
+	for epoch := 0; epoch < epochs; epoch++ {
+		totalLoss := 0.0
+		perm := rand.Perm(len(inputs))
+
+		for _, i := range perm {
+			n.ResetReplayStats()
+			n.Forward(inputs[i])
+			loss := n.ComputeLoss(targets[i])
+			replayPenalty := float64(n.TotalReplayThisSample())
+			loss += lambda * replayPenalty
+
+			if math.IsNaN(loss) || (earlyStopOnNegativeLoss && loss < 0) {
+				continue
+			}
+			totalLoss += loss
+			n.Backward(targets[i], learningRate)
+		}
+		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
+	}
+}
+
+func (n *Network) TotalReplayThisSample() int {
+	total := 0
+	for _, r := range n.ReplayStats {
+		if len(r) > 0 {
+			total += r[len(r)-1] // last entry is current sample's count
+		}
+	}
+	return total
 }
 
 // ComputeLoss calculates the loss for a sample
@@ -640,4 +701,28 @@ func (n *Network) GetOutput() []float64 {
 		output[x] = outputLayer.Neurons[0][x].Value // Assuming neurons are stored as [Height][Width]
 	}
 	return output
+}
+
+// GetOutputValues returns a flattened 1D slice of all neuron values in this grid.
+func (g *Grid) GetOutputValues() []float64 {
+	values := make([]float64, 0, g.Width*g.Height)
+	for y := 0; y < g.Height; y++ {
+		for x := 0; x < g.Width; x++ {
+			values = append(values, g.Neurons[y][x].Value)
+		}
+	}
+	return values
+}
+
+func (n *Network) ResetReplayStats() {
+	for k := range n.ReplayStats {
+		n.ReplayStats[k] = nil
+	}
+}
+
+func (n *Network) LogReplay(l int, count int) {
+	if _, exists := n.ReplayStats[l]; !exists {
+		n.ReplayStats[l] = []int{}
+	}
+	n.ReplayStats[l] = append(n.ReplayStats[l], count)
 }

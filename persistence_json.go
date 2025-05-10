@@ -27,9 +27,15 @@ type sNeuron struct {
 }
 
 type sLayer struct {
-	W       int         `json:"w"` // width  (neurons per row)
-	H       int         `json:"h"` // height (rows)
+	W       int         `json:"w"`
+	H       int         `json:"h"`
 	Neurons [][]sNeuron `json:"n"`
+
+	ReplayEnabled bool   `json:"re_enabled,omitempty"`
+	ReplayOffset  int    `json:"re_offset,omitempty"`
+	ReplayPhase   string `json:"re_phase,omitempty"`
+	MaxReplay     int    `json:"re_max,omitempty"`
+	ReplayBudget  int    `json:"re_budget,omitempty"`
 }
 
 type sNet struct {
@@ -44,9 +50,14 @@ func (n *Network) toS() sNet {
 
 	for li, L := range n.Layers {
 		sl := sLayer{
-			W:       L.Width,
-			H:       L.Height,
-			Neurons: make([][]sNeuron, L.Height),
+			W:             L.Width,
+			H:             L.Height,
+			Neurons:       make([][]sNeuron, L.Height),
+			ReplayEnabled: L.ReplayEnabled,
+			ReplayOffset:  L.ReplayOffset,
+			ReplayPhase:   L.ReplayPhase,
+			MaxReplay:     L.MaxReplay,
+			ReplayBudget:  L.ReplayBudget,
 		}
 
 		for y := 0; y < L.Height; y++ {
@@ -82,9 +93,14 @@ func (n *Network) fromS(s sNet) error {
 		}
 
 		L := Layer{
-			Width:   sl.W,
-			Height:  sl.H,
-			Neurons: make([][]*Neuron, sl.H),
+			Width:         sl.W,
+			Height:        sl.H,
+			Neurons:       make([][]*Neuron, sl.H),
+			ReplayEnabled: sl.ReplayEnabled,
+			ReplayOffset:  sl.ReplayOffset,
+			ReplayPhase:   sl.ReplayPhase,
+			MaxReplay:     sl.MaxReplay,
+			ReplayBudget:  sl.ReplayBudget,
 		}
 
 		for y := 0; y < sl.H; y++ {
