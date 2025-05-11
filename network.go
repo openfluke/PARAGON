@@ -53,13 +53,13 @@ type Network struct {
 	InputLayer  int
 	OutputLayer int
 	Debug       bool
-	AttnWeights []AttentionWeights // Per head
-	NHeads      int
-	FFWeights1  [][]float64       // [DModel][FeedForward]
-	FFBias1     []float64         // [FeedForward]
-	FFWeights2  [][]float64       // [FeedForward][DModel]
-	FFBias2     []float64         // [DModel]
-	Config      TransformerConfig // Configuration settings
+
+	NHeads     int
+	FFWeights1 [][]float64 // [DModel][FeedForward]
+	FFBias1    []float64   // [FeedForward]
+	FFWeights2 [][]float64 // [FeedForward][DModel]
+	FFBias2    []float64   // [DModel]
+
 	Performance *ADHDPerformance
 	Composite   *CompositePerformance
 	ReplayStats map[int][]int // layer index -> []replay count per sample
