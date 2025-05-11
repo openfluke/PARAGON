@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+
+	"gonum.org/v1/gonum/blas"
+	"gonum.org/v1/gonum/blas/blas64"
 )
 
 // Grid represents a 2D layer of neurons
@@ -23,7 +26,14 @@ type Grid struct {
 	ReplayGateToReps func(score float64) int         // Maps score to actual replays
 
 	CachedOutputs []float64 // used for entropy-based replay gating
+	Dense         *DenseCache
+}
 
+type DenseCache struct {
+	Weights []float64 // [out][in] flattened
+	Biases  []float64 // length = out
+	Out     []float64 // temp output values
+	DGrad   []float64 // temp backprop error (same shape as Out)
 }
 
 // Neuron represents a single unit in the grid
@@ -63,7 +73,7 @@ type Network struct {
 	Performance *ADHDPerformance
 	Composite   *CompositePerformance
 	ReplayStats map[int][]int // layer index -> []replay count per sample
-
+	UseBLAS     bool
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -230,7 +240,6 @@ func (n *Network) backwardLayer(
 // Forward pass with optional layer‑replay
 // ---------------------------------------------------------------------------
 func (n *Network) Forward(inputs [][]float64) {
-	// -- put sample into the input grid --------------------------------------
 	in := n.Layers[n.InputLayer]
 	if len(inputs) != in.Height || len(inputs[0]) != in.Width {
 		panic(fmt.Sprintf("input mismatch: want %dx%d, got %dx%d",
@@ -242,53 +251,36 @@ func (n *Network) Forward(inputs [][]float64) {
 		}
 	}
 
-	replayed := map[int]int{} // how many times we replayed each layer
+	replayed := map[int]int{}
 
-	// -- go through hidden/output layers -------------------------------------
 	for l := 1; l < len(n.Layers); l++ {
 		layer := &n.Layers[l]
 
-		// ► replay “before” ----------------------------------------------------
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "before" &&
-			replayed[l] < layer.MaxReplay {
-
-			start := l + layer.ReplayOffset
-			if start <= n.InputLayer {
-				start = n.InputLayer + 1
+		// ► replay "before"
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "before" && replayed[l] < layer.MaxReplay {
+			start := max(l+layer.ReplayOffset, n.InputLayer+1)
+			for i := start; i <= l; i++ {
+				n.forwardDispatch(i)
+				n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
 			}
-			if start >= 1 && start <= l {
-				for i := start; i <= l; i++ {
-					n.forwardLayer(i)
-					n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
-				}
-				replayed[l]++
-			}
+			replayed[l]++
 		}
 
-		// ► normal computation -------------------------------------------------
-		n.forwardLayer(l)
+		// ► main forward
+		n.forwardDispatch(l)
 		layer.CachedOutputs = layer.GetOutputValues()
 
-		// ► replay “after” -----------------------------------------------------
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "after" &&
-			replayed[l] < layer.MaxReplay {
-
-			start := l + layer.ReplayOffset
-			if start <= n.InputLayer {
-				start = n.InputLayer + 1
+		// ► replay "after"
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "after" && replayed[l] < layer.MaxReplay {
+			start := max(l+layer.ReplayOffset, n.InputLayer+1)
+			for i := start; i <= l; i++ {
+				n.forwardDispatch(i)
+				n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
 			}
-			if start >= 1 && start <= l {
-				for i := start; i <= l; i++ {
-					n.forwardLayer(i)
-					n.Layers[i].CachedOutputs = n.Layers[i].GetOutputValues()
-				}
-				replayed[l]++
-			}
+			replayed[l]++
 		}
 
-		// ► dynamic gated replay -----------------------------------------------
+		// ► dynamic gated replay
 		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
 			score := layer.ReplayGateFunc(nil)
 			nreps := layer.ReplayBudget
@@ -298,18 +290,15 @@ func (n *Network) Forward(inputs [][]float64) {
 			if nreps > layer.ReplayBudget {
 				nreps = layer.ReplayBudget
 			}
-
-			//fmt.Printf("[ReplayGate] Layer %d → Entropy %.4f → Replays %d\n", l, score, nreps)
-
 			for i := 0; i < nreps; i++ {
-				n.forwardLayer(l)
+				n.forwardDispatch(l)
 				layer.CachedOutputs = layer.GetOutputValues()
 				replayed[l]++
 			}
 		}
 	}
 
-	// -- soft‑max at the end (unchanged) -------------------------------------
+	// ► Softmax normalization if needed
 	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
@@ -328,7 +317,7 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 		}
 	}
 
-	// Output error
+	// Output layer error
 	out := n.Layers[n.OutputLayer]
 	for y := 0; y < out.Height; y++ {
 		for x := 0; x < out.Width; x++ {
@@ -344,34 +333,28 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 	for l := n.OutputLayer; l > 0; l-- {
 		layer := &n.Layers[l]
 
-		// Manual Replay — before
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "before" &&
-			replayed[l] < layer.MaxReplay {
-
+		// ► replay "before"
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "before" && replayed[l] < layer.MaxReplay {
 			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
 			for i := l; i >= stop; i-- {
-				n.backwardLayer(i, err, lr)
+				n.backwardDispatch(i, err, lr)
 			}
 			replayed[l]++
 		}
 
-		// Normal back-prop
-		n.backwardLayer(l, err, lr)
+		// ► main backprop
+		n.backwardDispatch(l, err, lr)
 
-		// Manual Replay — after
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "after" &&
-			replayed[l] < layer.MaxReplay {
-
+		// ► replay "after"
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "after" && replayed[l] < layer.MaxReplay {
 			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
 			for i := l; i >= stop; i-- {
-				n.backwardLayer(i, err, lr)
+				n.backwardDispatch(i, err, lr)
 			}
 			replayed[l]++
 		}
 
-		// Dynamic Gated Replay — only if enabled
+		// ► dynamic gated replay
 		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
 			score := layer.ReplayGateFunc(nil)
 			nreps := layer.ReplayBudget
@@ -381,13 +364,10 @@ func (n *Network) Backward(targets [][]float64, lr float64) {
 			if nreps > layer.ReplayBudget {
 				nreps = layer.ReplayBudget
 			}
-
 			for i := 0; i < nreps; i++ {
-				n.backwardLayer(l, err, lr)
+				n.backwardDispatch(l, err, lr)
 				replayed[l]++
 			}
-
-			// ✅ Log actual dynamic replays for this sample+layer
 			if n.ReplayStats != nil {
 				n.LogReplay(l, nreps)
 			}
@@ -725,4 +705,149 @@ func (n *Network) LogReplay(l int, count int) {
 		n.ReplayStats[l] = []int{}
 	}
 	n.ReplayStats[l] = append(n.ReplayStats[l], count)
+}
+
+func (n *Network) BLASForwardLayer(l int) {
+	grid := &n.Layers[l]
+	dc := grid.Dense
+	if dc == nil {
+		panic(fmt.Sprintf("Layer %d has no DenseCache; cannot use BLASForwardLayer", l))
+	}
+
+	prev := &n.Layers[l-1]
+	inVec := prev.GetOutputValues() // Length = in
+	outLen := len(dc.Biases)
+
+	// y = W·x   (out = W * inVec)
+	gA := blas64.General{
+		Rows:   outLen,
+		Cols:   len(inVec),
+		Stride: len(inVec),
+		Data:   dc.Weights,
+	}
+	gX := blas64.General{
+		Rows:   len(inVec),
+		Cols:   1,
+		Stride: 1,
+		Data:   inVec,
+	}
+	gY := blas64.General{
+		Rows:   outLen,
+		Cols:   1,
+		Stride: 1,
+		Data:   dc.Out,
+	}
+
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1.0, gA, gX, 0.0, gY)
+
+	// Add bias and apply activation
+	idx := 0
+	for y := 0; y < grid.Height; y++ {
+		for x := 0; x < grid.Width; x++ {
+			v := dc.Out[idx] + dc.Biases[idx]
+			v = applyActivation(v, grid.Neurons[y][x].Activation)
+			grid.Neurons[y][x].Value = v
+			idx++
+		}
+	}
+}
+
+func (n *Network) BLASBackwardLayer(l int, err [][][]float64, lr float64) {
+	curr := &n.Layers[l]
+	prev := &n.Layers[l-1]
+	dc := curr.Dense
+	if dc == nil {
+		panic(fmt.Sprintf("Layer %d has no DenseCache; cannot use BLASBackwardLayer", l))
+	}
+
+	in := prev.GetOutputValues() // [in]
+	outLen := len(dc.Biases)
+	inLen := len(in)
+
+	// Flatten current error into dc.DGrad
+	idx := 0
+	for y := 0; y < curr.Height; y++ {
+		for x := 0; x < curr.Width; x++ {
+			dc.DGrad[idx] = err[l][y][x]
+			idx++
+		}
+	}
+
+	// Weight update: W += lr * (dL/dY) ⊗ X
+	gDL := blas64.General{Rows: outLen, Cols: 1, Stride: 1, Data: dc.DGrad}
+	gX := blas64.General{Rows: 1, Cols: inLen, Stride: inLen, Data: in}
+	gW := blas64.General{Rows: outLen, Cols: inLen, Stride: inLen, Data: dc.Weights}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, lr, gDL, gX, 1.0, gW)
+
+	// Bias update
+	for i := range dc.Biases {
+		dc.Biases[i] += lr * dc.DGrad[i]
+	}
+
+	// Error propagation: δ = Wᵗ · dL/dY
+	gWT := blas64.General{Rows: inLen, Cols: outLen, Stride: outLen, Data: dc.Weights}
+	gPrev := blas64.General{Rows: inLen, Cols: 1, Stride: 1, Data: dc.DGrad} // reuse same buffer
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1.0, gWT, gDL, 0.0, gPrev)
+
+	// Store propagated error back into err[l-1], applying activation derivative
+	idx = 0
+	for y := 0; y < prev.Height; y++ {
+		for x := 0; x < prev.Width; x++ {
+			v := prev.Neurons[y][x].Value
+			err[l-1][y][x] += dc.DGrad[idx] * activationDerivative(v, prev.Neurons[y][x].Activation)
+			idx++
+		}
+	}
+}
+
+func (n *Network) forwardDispatch(l int) {
+	if n.UseBLAS && n.Layers[l].Dense != nil {
+		n.BLASForwardLayer(l)
+	} else {
+		n.forwardLayer(l)
+	}
+}
+
+func (n *Network) backwardDispatch(l int, err [][][]float64, lr float64) {
+	if n.UseBLAS && n.Layers[l].Dense != nil {
+		n.BLASBackwardLayer(l, err, lr)
+	} else {
+		n.backwardLayer(l, err, lr)
+	}
+}
+
+func (n *Network) BakeDenseMatrices(fullyConnected []bool) {
+	for l := 1; l < len(n.Layers); l++ {
+		if !fullyConnected[l] {
+			continue
+		}
+
+		prev := n.Layers[l-1]
+		curr := &n.Layers[l]
+
+		in := prev.Width * prev.Height
+		out := curr.Width * curr.Height
+
+		dc := &DenseCache{
+			Weights: make([]float64, out*in),
+			Biases:  make([]float64, out),
+			Out:     make([]float64, out),
+			DGrad:   make([]float64, in),
+		}
+
+		row := 0
+		for y := 0; y < curr.Height; y++ {
+			for x := 0; x < curr.Width; x++ {
+				neuron := curr.Neurons[y][x]
+				for _, c := range neuron.Inputs {
+					idx := row*in + (c.SourceY*prev.Width + c.SourceX)
+					dc.Weights[idx] = c.Weight
+				}
+				dc.Biases[row] = neuron.Bias
+				row++
+			}
+		}
+
+		curr.Dense = dc
+	}
 }
