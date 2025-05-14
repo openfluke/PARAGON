@@ -45,32 +45,36 @@ type SamplePerformance struct {
 }
 
 // ComputeAccuracy calculates the classification accuracy for a dataset.
-func ComputeAccuracy(nn *Network, inputs [][][]float64, targets [][][]float64) float64 {
+func ComputeAccuracy[T Numeric](nn *Network[T], inputs [][][]float64, targets [][][]float64) float64 {
 	if len(inputs) == 0 {
 		return 0
 	}
+
 	correct := 0
+
 	for i := range inputs {
 		nn.Forward(inputs[i])
 
-		// Suppose the output layer is 1D or 2D with (Height=1), and we have a one-hot target.
-		// This is typical for classification, but can be extended as needed.
-		outputValues := make([]float64, nn.Layers[nn.OutputLayer].Width)
-		for x := 0; x < nn.Layers[nn.OutputLayer].Width; x++ {
-			outputValues[x] = nn.Layers[nn.OutputLayer].Neurons[0][x].Value
+		// Extract output values from typed network
+		outputLayer := nn.Layers[nn.OutputLayer]
+		outputValues := make([]float64, outputLayer.Width)
+		for x := 0; x < outputLayer.Width; x++ {
+			outputValues[x] = float64(any(outputLayer.Neurons[0][x].Value).(T))
 		}
 
 		pred := argMax(outputValues)
 		label := argMax(targets[i][0])
+
 		if pred == label {
 			correct++
 		}
 	}
+
 	return float64(correct) / float64(len(inputs))
 }
 
 // EvaluateWithADHD runs the ADHD evaluation on a classification dataset.
-func EvaluateWithADHD(nn *Network, inputs [][][]float64, targets [][][]float64) {
+func EvaluateWithADHD[T Numeric](nn *Network[T], inputs [][][]float64, targets [][][]float64) {
 	if len(inputs) == 0 {
 		return
 	}
@@ -80,10 +84,14 @@ func EvaluateWithADHD(nn *Network, inputs [][][]float64, targets [][][]float64) 
 
 	for i := range inputs {
 		nn.Forward(inputs[i])
-		outputValues := make([]float64, nn.Layers[nn.OutputLayer].Width)
-		for x := 0; x < nn.Layers[nn.OutputLayer].Width; x++ {
-			outputValues[x] = nn.Layers[nn.OutputLayer].Neurons[0][x].Value
+
+		outputLayer := nn.Layers[nn.OutputLayer]
+		outputValues := make([]float64, outputLayer.Width)
+
+		for x := 0; x < outputLayer.Width; x++ {
+			outputValues[x] = float64(any(outputLayer.Neurons[0][x].Value).(T))
 		}
+
 		pred := argMax(outputValues)
 		label := argMax(targets[i][0])
 
@@ -91,7 +99,7 @@ func EvaluateWithADHD(nn *Network, inputs [][][]float64, targets [][][]float64) 
 		actualOutputs[i] = float64(pred)
 	}
 
-	nn.EvaluateModel(expectedOutputs, actualOutputs) // The ADHD logic from adhd.go
+	nn.EvaluateModel(expectedOutputs, actualOutputs) // ADHD core logic
 }
 
 // argMax finds the index of the largest value in a 1D slice.
@@ -105,7 +113,7 @@ func argMax(arr []float64) int {
 	return maxIdx
 }
 
-func (n *Network) EvaluateFull(expected, actual []float64) {
+func (n *Network[T]) EvaluateFull(expected, actual []float64) {
 	n.Performance = NewADHDPerformance()
 
 	errors := []ErrorSample{}
@@ -170,7 +178,7 @@ func min(a, b int) int {
 	return b
 }
 
-func (n *Network) PrintFullDiagnostics() {
+func (n *Network[T]) PrintFullDiagnostics() {
 	if n.Composite == nil {
 		fmt.Println("⚠️ No diagnostics found. Run EvaluateFull() first.")
 		return
@@ -199,7 +207,11 @@ func (n *Network) PrintFullDiagnostics() {
 	}
 }
 
-func ComputePerSamplePerformance(expectedVectors, actualVectors [][]float64, epsilon float64, net *Network) *SamplePerformance {
+func ComputePerSamplePerformance[T Numeric](
+	expectedVectors, actualVectors [][]float64,
+	epsilon float64,
+	net *Network[T],
+) *SamplePerformance {
 	net.Performance = NewADHDPerformance()
 	bucketMap := make(map[string]ADHDBucket)
 
@@ -249,11 +261,11 @@ func ComputePerSamplePerformance(expectedVectors, actualVectors [][]float64, eps
 			exact++
 		}
 
-		// Simulate a soft scalar deviation evaluation (for ADHD usage)
+		// Simulate soft confidence scoring
 		result := net.EvaluatePrediction(1.0, 1.0-meanPct/100.0)
 		net.UpdateADHDPerformance(result)
 
-		// Count the sample into the appropriate bucket
+		// Bucket the error
 		b := bucketMap[result.Bucket]
 		b.Count++
 		bucketMap[result.Bucket] = b
@@ -267,12 +279,13 @@ func ComputePerSamplePerformance(expectedVectors, actualVectors [][]float64, eps
 		return results[i].PctError > results[j].PctError
 	})
 
-	// Extract top 5 worst
+	// Top 5 worst samples
 	worst := make([]struct {
 		Index    int
 		AbsMean  float64
 		PctError float64
 	}, min(5, len(results)))
+
 	for i := 0; i < len(worst); i++ {
 		worst[i] = struct {
 			Index    int

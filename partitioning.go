@@ -2,21 +2,26 @@ package paragon
 
 import "fmt"
 
-func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int) {
+func (n *Network[T]) ForwardTagged(inputs [][]float64, numTags int, selectedTag int) {
 	inputGrid := n.Layers[n.InputLayer]
+
 	if len(inputs) != inputGrid.Height || len(inputs[0]) != inputGrid.Width {
-		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d", inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
+		panic(fmt.Sprintf("input dimensions mismatch: expected %dx%d, got %dx%d",
+			inputGrid.Height, inputGrid.Width, len(inputs), len(inputs[0])))
 	}
+
+	// Inject inputs
 	for y := 0; y < inputGrid.Height; y++ {
 		for x := 0; x < inputGrid.Width; x++ {
-			inputGrid.Neurons[y][x].Value = inputs[y][x]
+			inputGrid.Neurons[y][x].Value = T(inputs[y][x])
 		}
 	}
 
 	for l := 1; l < len(n.Layers); l++ {
 		layer := n.Layers[l]
+
 		if l == n.OutputLayer {
-			// Compute all neurons in the output layer
+			// Full computation on output layer
 			for y := 0; y < layer.Height; y++ {
 				for x := 0; x < layer.Width; x++ {
 					neuron := layer.Neurons[y][x]
@@ -25,48 +30,39 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 						src := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
 						sum += src.Value * conn.Weight
 					}
-					//neuron.Value = applyActivation(sum, neuron.Activation)
 
-					// *** ADDED FOR DIMENSIONAL NEURON ***
+					// Dimensional neuron logic
 					if neuron.Dimension != nil {
-						// We'll do the same "sub-network" forward logic that you have in Forward()
 						subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
-						inW := subInLayer.Width
-						inH := subInLayer.Height
-						totalIn := inW * inH
+						totalIn := subInLayer.Width * subInLayer.Height
 
 						if totalIn == 1 {
-							// single scalar input
-							subInput := [][]float64{{sum}}
+							subInput := [][]float64{{float64(any(sum).(T))}}
 							neuron.Dimension.Forward(subInput)
-							subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
-								Neurons[0][0].Value
-							neuron.Value = applyActivation(subOut, neuron.Activation)
+							subOut := T(any(neuron.Dimension.
+								Layers[neuron.Dimension.OutputLayer].
+								Neurons[0][0].Value).(T))
+							neuron.Value = ApplyActivationGeneric(subOut, neuron.Activation)
 						} else {
-							// multiple inputs expected by the sub-network
-							// for example, you might treat an entire row’s partial sums, etc.
-							// The exact shape logic depends on how you want to feed it in.
-
-							// Minimal example: if the sub-network is 1×N
-							// you could pass [1][N] or [N][1], etc.
-							// Here’s a quick example if sub-network is 1×1:
 							panic("Sub-network has multi-input shape – handle it like in your Forward() code.")
 						}
 					} else {
-						// normal activation
-						neuron.Value = applyActivation(sum, neuron.Activation)
+						neuron.Value = ApplyActivationGeneric(sum, neuron.Activation)
 					}
 
 					if n.Debug {
-						fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y, neuron.Value)
+						fmt.Printf("Layer %d, Neuron (%d,%d): Value=%.4f\n", l, x, y,
+							float64(any(neuron.Value).(T)))
 					}
 				}
 			}
+
 		} else {
-			// Compute only tagged section in hidden layers and zero others
+			// Selectively compute neurons in the active tag block
 			width := layer.Width
 			startX := (width * selectedTag) / numTags
 			endX := (width * (selectedTag + 1)) / numTags
+
 			for y := 0; y < layer.Height; y++ {
 				for x := 0; x < layer.Width; x++ {
 					if x >= startX && x < endX {
@@ -76,33 +72,26 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 							src := n.Layers[conn.SourceLayer].Neurons[conn.SourceY][conn.SourceX]
 							sum += src.Value * conn.Weight
 						}
-						//neuron.Value = applyActivation(sum, neuron.Activation)
 
-						// *** ADDED FOR DIMENSIONAL NEURON ***
 						if neuron.Dimension != nil {
-							// same idea as above
 							subInLayer := neuron.Dimension.Layers[neuron.Dimension.InputLayer]
-							inW := subInLayer.Width
-							inH := subInLayer.Height
-							totalIn := inW * inH
+							totalIn := subInLayer.Width * subInLayer.Height
 
 							if totalIn == 1 {
-								subInput := [][]float64{{sum}}
+								subInput := [][]float64{{float64(any(sum).(T))}}
 								neuron.Dimension.Forward(subInput)
-								subOut := neuron.Dimension.Layers[neuron.Dimension.OutputLayer].
-									Neurons[0][0].Value
-								neuron.Value = applyActivation(subOut, neuron.Activation)
+								subOut := T(any(neuron.Dimension.
+									Layers[neuron.Dimension.OutputLayer].
+									Neurons[0][0].Value).(T))
+								neuron.Value = ApplyActivationGeneric(subOut, neuron.Activation)
 							} else {
-								// if sub-network expects more than 1 input, replicate the logic from your Forward()
 								panic("Sub-network multi-input logic – replicate from your main Forward() code.")
 							}
 						} else {
-							// normal activation
-							neuron.Value = applyActivation(sum, neuron.Activation)
+							neuron.Value = ApplyActivationGeneric(sum, neuron.Activation)
 						}
-
 					} else {
-						layer.Neurons[y][x].Value = 0 // Zero out non-tagged neurons
+						layer.Neurons[y][x].Value = T(0)
 					}
 				}
 			}
@@ -113,14 +102,20 @@ func (n *Network) ForwardTagged(inputs [][]float64, numTags int, selectedTag int
 		n.ApplySoftmax()
 	}
 }
-
-func (n *Network) BackwardTagged(targets [][]float64, learningRate float64, numTags int, selectedTag int) {
+func (n *Network[T]) BackwardTagged(
+	targets [][]float64,
+	learningRate float64,
+	numTags int,
+	selectedTag int,
+) {
 	numLayers := len(n.Layers)
-	errorTerms := make([][][]float64, numLayers)
+	errorTerms := make([][][]T, numLayers)
+
 	for l := range n.Layers {
-		errorTerms[l] = make([][]float64, n.Layers[l].Height)
+		layer := n.Layers[l]
+		errorTerms[l] = make([][]T, layer.Height)
 		for y := range errorTerms[l] {
-			errorTerms[l][y] = make([]float64, n.Layers[l].Width)
+			errorTerms[l][y] = make([]T, layer.Width)
 		}
 	}
 
@@ -129,38 +124,57 @@ func (n *Network) BackwardTagged(targets [][]float64, learningRate float64, numT
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
 			neuron := outputLayer.Neurons[y][x]
-			errorTerms[n.OutputLayer][y][x] = (targets[y][x] - neuron.Value) * activationDerivative(neuron.Value, neuron.Activation)
+			pred := float64(any(neuron.Value).(T))
+			err := (targets[y][x] - pred) *
+				float64(any(ActivationDerivativeGeneric(neuron.Value, neuron.Activation)).(T))
+			errorTerms[n.OutputLayer][y][x] = T(err)
 		}
 	}
 
+	// Backprop through tagged blocks
 	for l := n.OutputLayer; l > 0; l-- {
 		layer := n.Layers[l]
 		prev := n.Layers[l-1]
+
 		width := layer.Width
 		startX := (width * selectedTag) / numTags
 		endX := (width * (selectedTag + 1)) / numTags
 
 		for y := 0; y < layer.Height; y++ {
 			for x := 0; x < layer.Width; x++ {
-				if l == n.OutputLayer || (x >= startX && x < endX) { // Update all output neurons, only tagged hidden neurons
+				// Train all output neurons, but only tagged hidden neurons
+				if l == n.OutputLayer || (x >= startX && x < endX) {
 					neuron := layer.Neurons[y][x]
 					err := errorTerms[l][y][x]
-					neuron.Bias += learningRate * err
+					neuron.Bias += T(learningRate) * err
+
 					for i, conn := range neuron.Inputs {
 						srcNeuron := prev.Neurons[conn.SourceY][conn.SourceX]
-						gradW := err * srcNeuron.Value
-						if gradW > 5 {
-							gradW = 5
-						} else if gradW < -5 {
-							gradW = -5
+						grad := err * srcNeuron.Value
+
+						// Clip gradient
+						var clippedGrad T
+						switch any(clippedGrad).(type) {
+						case float32, float64:
+							fg := float64(any(grad).(T))
+							if fg > 5 {
+								fg = 5
+							} else if fg < -5 {
+								fg = -5
+							}
+							clippedGrad = T(fg)
+						default:
+							clippedGrad = grad // no clip for integers
 						}
-						neuron.Inputs[i].Weight += learningRate * gradW
+
+						neuron.Inputs[i].Weight += T(learningRate) * clippedGrad
+
+						// Accumulate tagged error in previous layer
 						if l-1 > 0 {
-							// Only accumulate error terms for tagged section in hidden layers
 							prevWidth := prev.Width
-							prevStartX := (prevWidth * selectedTag) / numTags
-							prevEndX := (prevWidth * (selectedTag + 1)) / numTags
-							if conn.SourceX >= prevStartX && conn.SourceX < prevEndX {
+							prevStart := (prevWidth * selectedTag) / numTags
+							prevEnd := (prevWidth * (selectedTag + 1)) / numTags
+							if conn.SourceX >= prevStart && conn.SourceX < prevEnd {
 								errorTerms[l-1][conn.SourceY][conn.SourceX] += err * conn.Weight
 							}
 						}
@@ -169,14 +183,15 @@ func (n *Network) BackwardTagged(targets [][]float64, learningRate float64, numT
 			}
 		}
 
-		// Apply activation derivative only to tagged section in hidden layers
+		// Chain rule: apply derivative to tagged block of previous layer
 		if l-1 > 0 {
-			prevWidth := prev.Width
-			prevStartX := (prevWidth * selectedTag) / numTags
-			prevEndX := (prevWidth * (selectedTag + 1)) / numTags
-			for y := 0; y < prev.Height; y++ {
-				for x := prevStartX; x < prevEndX; x++ {
-					errorTerms[l-1][y][x] *= activationDerivative(prev.Neurons[y][x].Value, prev.Neurons[y][x].Activation)
+			prevWidth := n.Layers[l-1].Width
+			start := (prevWidth * selectedTag) / numTags
+			end := (prevWidth * (selectedTag + 1)) / numTags
+			for y := 0; y < n.Layers[l-1].Height; y++ {
+				for x := start; x < end; x++ {
+					neuron := n.Layers[l-1].Neurons[y][x]
+					errorTerms[l-1][y][x] *= ActivationDerivativeGeneric(neuron.Value, neuron.Activation)
 				}
 			}
 		}

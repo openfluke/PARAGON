@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 )
 
 // Softmax computes the softmax of a slice
@@ -89,7 +90,7 @@ func ReadCSV(filename string) ([][]string, error) {
 
 // PadInputToFullSize pads a partial input slice with a given value so it matches the network's full input size.
 // This is useful when only some inputs are available and you want to fill the rest with a default.
-func (n *Network) PadInputToFullSize(partial []float64, fill float64) []float64 {
+func (n *Network[T]) PadInputToFullSize(partial []float64, fill float64) []float64 {
 	inputLayer := n.Layers[n.InputLayer]
 	totalSize := inputLayer.Width * inputLayer.Height
 
@@ -101,4 +102,37 @@ func (n *Network) PadInputToFullSize(partial []float64, fill float64) []float64 
 	}
 
 	return result
+}
+
+func CastFloat64SliceToT[T Numeric](in []float64) []T {
+	out := make([]T, len(in))
+	for i := range in {
+		out[i] = T(in[i])
+	}
+	return out
+}
+
+func calculateMaxVal[T any](numInputs int) uint64 {
+	var weight T
+	var typeMax uint64
+	switch reflect.TypeOf(weight).Kind() {
+	case reflect.Uint:
+		typeMax = uint64(^uint(0)) // System-dependent max uint
+	case reflect.Uint8:
+		typeMax = math.MaxUint8
+	case reflect.Uint64:
+		typeMax = math.MaxUint64
+	default:
+		typeMax = math.MaxUint64 // Default case
+	}
+
+	maxValFloat := float64(typeMax) / math.Sqrt(float64(numInputs))
+	if maxValFloat > float64(typeMax) {
+		maxValFloat = float64(typeMax)
+	}
+	maxVal := uint64(maxValFloat)
+	if maxVal < 1 {
+		maxVal = 1
+	}
+	return maxVal
 }

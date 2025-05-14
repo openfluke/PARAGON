@@ -60,7 +60,7 @@ func NewADHDPerformance() *ADHDPerformance {
 }
 
 // EvaluatePrediction categorizes an expected vs actual output into an ADHD bucket
-func (n *Network) EvaluatePrediction(expected, actual float64) ADHDResult {
+func (n *Network[T]) EvaluatePrediction(expected, actual float64) ADHDResult {
 	var deviation float64
 	if math.Abs(expected) < 1e-10 { // Handle near-zero expected values
 		deviation = math.Abs(actual-expected) * 100 // Scale to percentage
@@ -95,7 +95,7 @@ func (n *Network) EvaluatePrediction(expected, actual float64) ADHDResult {
 }
 
 // (n *Network) UpdateADHDPerformance updates the performance struct with a single result
-func (n *Network) UpdateADHDPerformance(result ADHDResult) {
+func (n *Network[T]) UpdateADHDPerformance(result ADHDResult) {
 	bucket := n.Performance.Buckets[result.Bucket]
 	bucket.Count++
 	n.Performance.Buckets[result.Bucket] = bucket
@@ -114,7 +114,7 @@ func (n *Network) UpdateADHDPerformance(result ADHDResult) {
 	n.Performance.Score += math.Max(0, 100-result.Deviation)
 }
 
-func (n *Network) ComputeFinalScore() float64 {
+func (n *Network[T]) ComputeFinalScore() float64 {
 	if n.Performance.Total == 0 || math.IsNaN(n.Performance.Score) || math.IsInf(n.Performance.Score, 0) {
 		return 0 // Avoid NaN issues
 	}
@@ -122,7 +122,7 @@ func (n *Network) ComputeFinalScore() float64 {
 }
 
 // (n *Network) EvaluateModel processes a batch of expected vs actual outputs
-func (n *Network) EvaluateModel(expectedOutputs, actualOutputs []float64) {
+func (n *Network[T]) EvaluateModel(expectedOutputs, actualOutputs []float64) {
 	if len(expectedOutputs) != len(actualOutputs) {
 		fmt.Println("Error: Mismatched expected vs actual data sizes.")
 		return
@@ -139,9 +139,13 @@ func (n *Network) EvaluateModel(expectedOutputs, actualOutputs []float64) {
 }
 
 // EvaluateFromCheckpoint evaluates ADHD metrics using checkpoint states
-func (n *Network) EvaluateFromCheckpoint(checkpoints [][][]float64, expectedOutputs []float64, checkpointLayerIdx int) {
+func (n *Network[T]) EvaluateFromCheckpoint(
+	checkpoints [][][]float64,
+	expectedOutputs []float64,
+	checkpointLayerIdx int,
+) {
 	if len(checkpoints) != len(expectedOutputs) {
-		fmt.Printf("Error: Mismatched checkpoints (%d) vs expected outputs (%d) sizes.\n", len(checkpoints), len(expectedOutputs))
+		fmt.Printf("Error: Mismatched checkpoints (%d) vs expected outputs (%d).\n", len(checkpoints), len(expectedOutputs))
 		return
 	}
 
@@ -149,17 +153,21 @@ func (n *Network) EvaluateFromCheckpoint(checkpoints [][][]float64, expectedOutp
 	actualOutputs := make([]float64, len(expectedOutputs))
 
 	for i := range checkpoints {
-		// Compute output from checkpoint
+		// Forward from checkpoint
 		n.ForwardFromLayer(checkpointLayerIdx, checkpoints[i])
+
 		outputLayer := n.Layers[n.OutputLayer]
 		outputValues := make([]float64, outputLayer.Width)
+
 		for x := 0; x < outputLayer.Width; x++ {
-			outputValues[x] = outputLayer.Neurons[0][x].Value
+			outputValues[x] = float64(any(outputLayer.Neurons[0][x].Value).(T))
 		}
+
 		pred := ArgMax(outputValues)
 		actualOutputs[i] = float64(pred)
 	}
 
+	// Evaluation loop
 	for i := range expectedOutputs {
 		result := n.EvaluatePrediction(expectedOutputs[i], actualOutputs[i])
 		n.UpdateADHDPerformance(result)
@@ -171,7 +179,7 @@ func (n *Network) EvaluateFromCheckpoint(checkpoints [][][]float64, expectedOutp
 // EvaluateFromCheckpointFilesWithTiming loads checkpoint files, runs the forward pass
 // from the given checkpoint layer, and evaluates the ADHD score.
 // It returns the computed score along with the total file load and forward times.
-func (n *Network) EvaluateFromCheckpointFilesWithTiming(checkpointFiles []string, expectedOutputs []float64, checkpointLayerIdx int) (score float64, totalLoadTime, totalForwardTime time.Duration) {
+func (n *Network[T]) EvaluateFromCheckpointFilesWithTiming(checkpointFiles []string, expectedOutputs []float64, checkpointLayerIdx int) (score float64, totalLoadTime, totalForwardTime time.Duration) {
 	// Validate that the number of checkpoint files matches the expected outputs.
 	if len(checkpointFiles) != len(expectedOutputs) {
 		fmt.Printf("Error: Mismatched checkpoint files (%d) vs expected outputs (%d) sizes.\n", len(checkpointFiles), len(expectedOutputs))
@@ -216,11 +224,13 @@ func (n *Network) EvaluateFromCheckpointFilesWithTiming(checkpointFiles []string
 }
 
 // ExtractOutput returns the output layer values as a slice.
-func (n *Network) ExtractOutput() []float64 {
+func (n *Network[T]) ExtractOutput() []float64 {
 	outWidth := n.Layers[n.OutputLayer].Width
 	output := make([]float64, outWidth)
+
 	for x := 0; x < outWidth; x++ {
-		output[x] = n.Layers[n.OutputLayer].Neurons[0][x].Value
+		output[x] = float64(any(n.Layers[n.OutputLayer].Neurons[0][x].Value).(T))
 	}
+
 	return output
 }

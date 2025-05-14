@@ -9,7 +9,7 @@ import (
 /*────────────────────────────  aliases  ────────────────────────────────*/
 // Paragon’s concrete layer type is Grid.  Alias it so we can keep using
 // the more generic name “Layer” in this file.
-type Layer = Grid
+type Layer[T Numeric] = Grid[T]
 
 /*────────────────────────── serialisable shapes ───────────────────────*/
 
@@ -45,7 +45,7 @@ type sNet struct {
 /*────────────────── helpers: Network ↔ serialisable ───────────────────*/
 
 // toS flattens a runtime Network into raw data ready for JSON.
-func (n *Network) toS() sNet {
+func (n *Network[T]) toS() sNet {
 	s := sNet{Layers: make([]sLayer, len(n.Layers))}
 
 	for li, L := range n.Layers {
@@ -65,18 +65,26 @@ func (n *Network) toS() sNet {
 
 			for x := 0; x < L.Width; x++ {
 				src := L.Neurons[y][x]
+
 				sn := sNeuron{
-					Bias: src.Bias,
+					Bias: float64(any(src.Bias).(T)),
 					Act:  src.Activation,
 					In:   make([]sConn, len(src.Inputs)),
 				}
+
 				for k, c := range src.Inputs {
-					sn.In[k] = sConn{L: c.SourceLayer, X: c.SourceX, Y: c.SourceY, W: c.Weight}
+					sn.In[k] = sConn{
+						L: c.SourceLayer,
+						X: c.SourceX,
+						Y: c.SourceY,
+						W: float64(any(c.Weight).(T)),
+					}
 				}
 				row[x] = sn
 			}
 			sl.Neurons[y] = row
 		}
+
 		s.Layers[li] = sl
 	}
 
@@ -84,18 +92,18 @@ func (n *Network) toS() sNet {
 }
 
 // fromS rebuilds a Network from the flattened form.
-func (n *Network) fromS(s sNet) error {
-	n.Layers = make([]Layer, len(s.Layers))
+func (n *Network[T]) fromS(s sNet) error {
+	n.Layers = make([]Grid[T], len(s.Layers))
 
 	for li, sl := range s.Layers {
 		if sl.W == 0 || sl.H == 0 {
 			return fmt.Errorf("layer %d has zero width or height", li)
 		}
 
-		L := Layer{
+		L := Grid[T]{
 			Width:         sl.W,
 			Height:        sl.H,
-			Neurons:       make([][]*Neuron, sl.H),
+			Neurons:       make([][]*Neuron[T], sl.H),
 			ReplayEnabled: sl.ReplayEnabled,
 			ReplayOffset:  sl.ReplayOffset,
 			ReplayPhase:   sl.ReplayPhase,
@@ -108,27 +116,28 @@ func (n *Network) fromS(s sNet) error {
 				return fmt.Errorf("layer %d row %d width mismatch", li, y)
 			}
 
-			row := make([]*Neuron, sl.W)
+			row := make([]*Neuron[T], sl.W)
 
 			for x := 0; x < sl.W; x++ {
 				sn := sl.Neurons[y][x]
-				nn := &Neuron{
-					Bias:       sn.Bias,
+				nn := &Neuron[T]{
+					Bias:       T(sn.Bias),
 					Activation: sn.Act,
-					Inputs:     make([]Connection, len(sn.In)),
+					Inputs:     make([]Connection[T], len(sn.In)),
 				}
 				for k, c := range sn.In {
-					nn.Inputs[k] = Connection{
+					nn.Inputs[k] = Connection[T]{
 						SourceLayer: c.L,
 						SourceX:     c.X,
 						SourceY:     c.Y,
-						Weight:      c.W,
+						Weight:      T(c.W),
 					}
 				}
 				row[x] = nn
 			}
 			L.Neurons[y] = row
 		}
+
 		n.Layers[li] = L
 	}
 
@@ -139,7 +148,7 @@ func (n *Network) fromS(s sNet) error {
 /*──────────────────────────── public API ───────────────────────────────*/
 
 // SaveJSON writes the full topology + weights of the network.
-func (n *Network) SaveJSON(path string) error {
+func (n *Network[T]) SaveJSON(path string) error {
 	b, err := json.MarshalIndent(n.toS(), "", " ")
 	if err != nil {
 		return err
@@ -147,8 +156,7 @@ func (n *Network) SaveJSON(path string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
-// LoadJSON restores a network that was saved with SaveJSON.
-func (n *Network) LoadJSON(path string) error {
+func (n *Network[T]) LoadJSON(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -160,14 +168,11 @@ func (n *Network) LoadJSON(path string) error {
 	return n.fromS(s)
 }
 
-// MarshalJSONModel returns the model as a JSON byte‑slice in the same
-// loss‑less format SaveJSON uses (handy for in‑memory cloning).
-func (n *Network) MarshalJSONModel() ([]byte, error) {
+func (n *Network[T]) MarshalJSONModel() ([]byte, error) {
 	return json.Marshal(n.toS())
 }
 
-// UnmarshalJSONModel overwrites *n with data produced by MarshalJSONModel.
-func (n *Network) UnmarshalJSONModel(b []byte) error {
+func (n *Network[T]) UnmarshalJSONModel(b []byte) error {
 	var sn sNet
 	if err := json.Unmarshal(b, &sn); err != nil {
 		return err
