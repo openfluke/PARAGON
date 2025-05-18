@@ -52,7 +52,7 @@ type Network[T Numeric] struct {
 	InputLayer  int
 	OutputLayer int
 	Debug       bool
-
+	TypeName    string
 	Performance *ADHDPerformance
 	Composite   *CompositePerformance
 	ReplayStats map[int][]int // layer index → replay counts per sample
@@ -69,6 +69,7 @@ func NewNetwork[T Numeric](
 	}
 
 	n := &Network[T]{
+		TypeName:    reflect.TypeOf(*new(T)).Name(),
 		Layers:      make([]Grid[T], len(layerSizes)),
 		InputLayer:  0,
 		OutputLayer: len(layerSizes) - 1,

@@ -39,6 +39,7 @@ type sLayer struct {
 }
 
 type sNet struct {
+	Type   string   `json:"type"`
 	Layers []sLayer `json:"layers"`
 }
 
@@ -46,7 +47,9 @@ type sNet struct {
 
 // toS flattens a runtime Network into raw data ready for JSON.
 func (n *Network[T]) toS() sNet {
-	s := sNet{Layers: make([]sLayer, len(n.Layers))}
+	s := sNet{
+		Type:   n.TypeName,
+		Layers: make([]sLayer, len(n.Layers))}
 
 	for li, L := range n.Layers {
 		sl := sLayer{
@@ -93,6 +96,12 @@ func (n *Network[T]) toS() sNet {
 
 // fromS rebuilds a Network from the flattened form.
 func (n *Network[T]) fromS(s sNet) error {
+
+	// Type check!
+	if s.Type != "" && n.TypeName != "" && s.Type != n.TypeName {
+		return fmt.Errorf("type mismatch: model is '%s' but this network is '%s'", s.Type, n.TypeName)
+	}
+
 	n.Layers = make([]Grid[T], len(s.Layers))
 
 	for li, sl := range s.Layers {
