@@ -46,7 +46,7 @@ type sNet struct {
 /*────────────────── helpers: Network ↔ serialisable ───────────────────*/
 
 // toS flattens a runtime Network into raw data ready for JSON.
-func (n *Network[T]) toS() sNet {
+func (n *Network[T]) ToS() sNet {
 	s := sNet{
 		Type:   n.TypeName,
 		Layers: make([]sLayer, len(n.Layers))}
@@ -95,7 +95,7 @@ func (n *Network[T]) toS() sNet {
 }
 
 // fromS rebuilds a Network from the flattened form.
-func (n *Network[T]) fromS(s sNet) error {
+func (n *Network[T]) FromS(s sNet) error {
 
 	// Type check!
 	if s.Type != "" && n.TypeName != "" && s.Type != n.TypeName {
@@ -158,7 +158,7 @@ func (n *Network[T]) fromS(s sNet) error {
 
 // SaveJSON writes the full topology + weights of the network.
 func (n *Network[T]) SaveJSON(path string) error {
-	b, err := json.MarshalIndent(n.toS(), "", " ")
+	b, err := json.MarshalIndent(n.ToS(), "", " ")
 	if err != nil {
 		return err
 	}
@@ -174,11 +174,11 @@ func (n *Network[T]) LoadJSON(path string) error {
 	if err = json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	return n.fromS(s)
+	return n.FromS(s)
 }
 
 func (n *Network[T]) MarshalJSONModel() ([]byte, error) {
-	return json.Marshal(n.toS())
+	return json.Marshal(n.ToS())
 }
 
 func (n *Network[T]) UnmarshalJSONModel(b []byte) error {
@@ -186,5 +186,5 @@ func (n *Network[T]) UnmarshalJSONModel(b []byte) error {
 	if err := json.Unmarshal(b, &sn); err != nil {
 		return err
 	}
-	return n.fromS(sn)
+	return n.FromS(sn)
 }

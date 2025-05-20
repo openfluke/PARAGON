@@ -37,7 +37,7 @@ func (n *Network[T]) InitNAS(
 	parentScore := n.Performance.Score
 
 	// 2. Serialize parent network
-	parentBytes, err := json.Marshal(n.toS())
+	parentBytes, err := json.Marshal(n.ToS())
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("marshal parent: %v", err)
 	}
@@ -55,7 +55,7 @@ func (n *Network[T]) InitNAS(
 			return nil, 0, false, fmt.Errorf("clone %d decode: %v", i, err)
 		}
 		clone := &Network[T]{}
-		if err := clone.fromS(sn); err != nil {
+		if err := clone.FromS(sn); err != nil {
 			return nil, 0, false, fmt.Errorf("clone %d rebuild: %v", i, err)
 		}
 
