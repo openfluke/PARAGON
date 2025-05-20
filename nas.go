@@ -1,8 +1,6 @@
 package paragon
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 )
@@ -36,11 +34,8 @@ func (n *Network[T]) InitNAS(
 	n.EvaluateModel(exp, act)
 	parentScore := n.Performance.Score
 
-	// 2. Serialize parent network
-	parentBytes, err := json.Marshal(n.ToS())
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("marshal parent: %v", err)
-	}
+	// 2. Create parent snapshot once
+	parentSnap := n.ToS()
 
 	type res struct {
 		net   *Network[T]
@@ -50,12 +45,8 @@ func (n *Network[T]) InitNAS(
 
 	// 3. Clone, mutate, train, evaluate
 	for i := 0; i < numClones; i++ {
-		var sn sNet
-		if err := json.NewDecoder(bytes.NewReader(parentBytes)).Decode(&sn); err != nil {
-			return nil, 0, false, fmt.Errorf("clone %d decode: %v", i, err)
-		}
 		clone := &Network[T]{}
-		if err := clone.FromS(sn); err != nil {
+		if err := clone.FromS(parentSnap); err != nil {
 			return nil, 0, false, fmt.Errorf("clone %d rebuild: %v", i, err)
 		}
 
@@ -76,7 +67,7 @@ func (n *Network[T]) InitNAS(
 		}
 
 		// 3c. Perturb weights
-		perturbWeights(clone, weightMutRate, i)
+		clone.PerturbWeights(weightMutRate, i)
 
 		// 4. Train with clipping
 		for e := 0; e < epochs; e++ {
@@ -110,30 +101,6 @@ func flattenIO[T Numeric](n *Network[T], ins, tgts [][][]float64) (exp, act []fl
 		exp = append(exp, tgts[i][0]...)        // Expected: flat one-hot row
 	}
 	return
-}
-
-// perturbWeights adds N(0, rate) noise to every connection weight.
-func perturbWeights[T Numeric](net *Network[T], rate float64, seed int) {
-	rng := rand.New(rand.NewSource(int64(seed)))
-
-	for l := 1; l < len(net.Layers); l++ { // skip input layer
-		layer := net.Layers[l]
-		for y := 0; y < layer.Height; y++ {
-			for x := 0; x < layer.Width; x++ {
-				neuron := layer.Neurons[y][x]
-				for k := range neuron.Inputs {
-					// Only perturb if T supports float math
-					switch any(neuron.Inputs[k].Weight).(type) {
-					case float32, float64:
-						noise := rng.NormFloat64() * rate
-						neuron.Inputs[k].Weight += T(noise)
-					default:
-						// Skip perturbation for int/uint types
-					}
-				}
-			}
-		}
-	}
 }
 
 /*
