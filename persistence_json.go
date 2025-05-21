@@ -188,3 +188,64 @@ func (n *Network[T]) UnmarshalJSONModel(b []byte) error {
 	}
 	return n.FromS(sn)
 }
+
+// LoadNamedNetworkFromJSONString loads a Paragon network from a raw JSON string.
+// It dynamically detects the type and returns the network as `any`.
+func LoadNamedNetworkFromJSONString(jsonStr string) (any, error) {
+	var s sNet
+	if err := json.Unmarshal([]byte(jsonStr), &s); err != nil {
+		return nil, fmt.Errorf("json unmarshal failed: %w", err)
+	}
+
+	switch s.Type {
+	case "int":
+		n := &Network[int]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "int8":
+		n := &Network[int8]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "int16":
+		n := &Network[int16]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "int32":
+		n := &Network[int32]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "int64":
+		n := &Network[int64]{TypeName: s.Type}
+		return n, n.FromS(s)
+
+	case "uint":
+		n := &Network[uint]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "uint8":
+		n := &Network[uint8]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "uint16":
+		n := &Network[uint16]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "uint32":
+		n := &Network[uint32]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "uint64":
+		n := &Network[uint64]{TypeName: s.Type}
+		return n, n.FromS(s)
+
+	case "float32":
+		n := &Network[float32]{TypeName: s.Type}
+		return n, n.FromS(s)
+	case "float64":
+		n := &Network[float64]{TypeName: s.Type}
+		return n, n.FromS(s)
+
+	default:
+		return nil, fmt.Errorf("unsupported network type: %s", s.Type)
+	}
+}
+
+func LoadNamedNetworkFromJSONFile(path string) (any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	return LoadNamedNetworkFromJSONString(string(data))
+}
