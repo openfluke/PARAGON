@@ -102,6 +102,8 @@ func (n *Network[T]) FromS(s sNet) error {
 		return fmt.Errorf("type mismatch: model is '%s' but this network is '%s'", s.Type, n.TypeName)
 	}
 
+	n.TypeName = s.Type
+
 	n.Layers = make([]Grid[T], len(s.Layers))
 
 	for li, sl := range s.Layers {
