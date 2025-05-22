@@ -104,29 +104,44 @@ func NewNetwork[T Numeric](
 	return n
 }
 
-func (n *Network[T]) getFullyConnectedInputs(prevLayerIdx int, prevLayer Grid[T]) []Connection[T] {
-	connections := make([]Connection[T], prevLayer.Width*prevLayer.Height)
+// getFullyConnectedInputs returns a full-fan-in list of connections from the
+// previous layer, initialising weights so that *all* Numeric types are safe.
+// (No more “invalid argument to Int63n” when the input layer is very small.)
+func (n *Network[T]) getFullyConnectedInputs(
+	prevLayerIdx int,
+	prevLayer Grid[T],
+) []Connection[T] {
+
 	numInputs := prevLayer.Width * prevLayer.Height
+	conns := make([]Connection[T], numInputs)
 	idx := 0
 
-	var weight T
-	kind := reflect.TypeOf(weight).Kind()
+	var w T
+	kind := reflect.TypeOf(w).Kind()
 
+	//---------------------------------------------------------------------//
+	// Floating-point types –             just draw from  (-1, 1)
+	//---------------------------------------------------------------------//
 	if kind == reflect.Float32 || kind == reflect.Float64 {
-		// Floating-point types: weights in range [-1, 1]
 		for y := 0; y < prevLayer.Height; y++ {
 			for x := 0; x < prevLayer.Width; x++ {
-				weight = T(rand.Float64()*2 - 1)
-				connections[idx] = Connection[T]{prevLayerIdx, x, y, weight}
+				w = T(rand.Float64()*2 - 1)
+				conns[idx] = Connection[T]{prevLayerIdx, x, y, w}
 				idx++
 			}
 		}
-		return connections
+		return conns
 	}
 
-	// Integer types
-	var isUnsigned bool
-	var typeMax int64
+	//---------------------------------------------------------------------//
+	// Integer types – pick a sensible symmetric range and CLAMP it so the
+	// Int63n upper-bound is   1 ≤ bound ≤ math.MaxInt64.
+	//---------------------------------------------------------------------//
+	var (
+		isUnsigned bool
+		typeMax    int64
+	)
+
 	switch kind {
 	case reflect.Int8:
 		typeMax = math.MaxInt8
@@ -134,44 +149,47 @@ func (n *Network[T]) getFullyConnectedInputs(prevLayerIdx int, prevLayer Grid[T]
 		typeMax = math.MaxInt16
 	case reflect.Int32:
 		typeMax = math.MaxInt32
-	case reflect.Int64, reflect.Int:
+	case reflect.Int, reflect.Int64:
 		typeMax = math.MaxInt64
 	case reflect.Uint8:
-		typeMax = int64(math.MaxUint8)
-		isUnsigned = true
+		typeMax, isUnsigned = int64(math.MaxUint8), true
 	case reflect.Uint16:
-		typeMax = int64(math.MaxUint16)
-		isUnsigned = true
+		typeMax, isUnsigned = int64(math.MaxUint16), true
 	case reflect.Uint32:
-		typeMax = int64(math.MaxUint32)
-		isUnsigned = true
-	case reflect.Uint64, reflect.Uint:
-		typeMax = int64(^uint64(0) >> 1) // Clamp safely to int64
-		isUnsigned = true
+		typeMax, isUnsigned = int64(math.MaxUint32), true
+	case reflect.Uint, reflect.Uint64:
+		typeMax, isUnsigned = math.MaxInt64, true // clamp to int64
 	default:
-		panic("Unsupported type in getFullyConnectedInputs")
+		panic("unsupported Numeric type")
 	}
 
-	// Scale based on numInputs
+	// He-style scaling:  typeMax / √fan-in
 	scale := typeMax / int64(math.Sqrt(float64(numInputs)))
 	if scale < 1 {
 		scale = 1
 	}
+	// --- HARD CAP so 2*scale+1 never overflows int64 ------------------- //
+	const int63Max = int64(math.MaxInt64)
+	if 2*scale+1 > int63Max {
+		scale = (int63Max - 1) / 2 //  == 4 611 686 018 427 387 903
+	}
 
 	for y := 0; y < prevLayer.Height; y++ {
 		for x := 0; x < prevLayer.Width; x++ {
-			var val int64
+			var v int64
 			if isUnsigned {
-				val = rand.Int63n(scale + 1)
+				// [0 … scale]
+				v = rand.Int63n(scale + 1)
 			} else {
-				val = rand.Int63n(2*scale+1) - scale
+				// [-scale … +scale]
+				bound := 2*scale + 1 // guaranteed ≤ int63Max
+				v = rand.Int63n(bound) - scale
 			}
-			weight = T(val)
-			connections[idx] = Connection[T]{prevLayerIdx, x, y, weight}
+			conns[idx] = Connection[T]{prevLayerIdx, x, y, T(v)}
 			idx++
 		}
 	}
-	return connections
+	return conns
 }
 
 func (n *Network[T]) getLocalConnections(
