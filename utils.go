@@ -136,3 +136,37 @@ func calculateMaxVal[T any](numInputs int) uint64 {
 	}
 	return maxVal
 }
+
+func softmax32(in []float32) []float32 {
+	maxVal := in[0]
+	for _, v := range in {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	expSum := float32(0.0)
+	for _, v := range in {
+		expSum += float32(math.Exp(float64(v - maxVal)))
+	}
+	out := make([]float32, len(in))
+	for i, v := range in {
+		out[i] = float32(math.Exp(float64(v-maxVal))) / expSum
+	}
+	return out
+}
+
+func applyActivationFloat32(value float32, activation string) float32 {
+	switch activation {
+	case "relu":
+		if value > 0 {
+			return value
+		}
+		return 0
+	case "sigmoid":
+		return 1 / (1 + float32(math.Exp(-float64(value))))
+	case "tanh":
+		return float32(math.Tanh(float64(value)))
+	default:
+		return value
+	}
+}
