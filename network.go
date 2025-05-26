@@ -23,6 +23,7 @@ type Grid[T Numeric] struct {
 	ReplayGateToReps func(score float64) int   // Maps score to actual replays
 
 	CachedOutputs []T // used for entropy-based replay gating
+
 }
 
 // Neuron represents a single unit in the grid
@@ -48,14 +49,16 @@ type Connection[T Numeric] struct {
 
 // Network encapsulates the entire model
 type Network[T Numeric] struct {
-	Layers      []Grid[T]
-	InputLayer  int
-	OutputLayer int
-	Debug       bool
-	TypeName    string
-	Performance *ADHDPerformance
-	Composite   *CompositePerformance
-	ReplayStats map[int][]int // layer index → replay counts per sample
+	Layers       []Grid[T]
+	InputLayer   int
+	OutputLayer  int
+	Debug        bool
+	TypeName     string
+	Performance  *ADHDPerformance
+	Composite    *CompositePerformance
+	ReplayStats  map[int][]int // layer index → replay counts per sample
+	WebGPUNative bool
+	gpuProc      *GPUProcess
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -256,8 +259,25 @@ func (n *Network[T]) ConnectLayers(fullyConnected []bool) {
 // Low‑level helpers (identical logic to your originals)
 // ---------------------------------------------------------------------------
 func (n *Network[T]) forwardLayer(l int) {
+	//start := time.Now()
 	curr := n.Layers[l]
 
+	// Debug: Print out current backend flags and type compatibility
+	//fmt.Printf("DEBUG: WebGPUNative=%v, isWGSLCompatibleType=%v, layer=%d\n", n.WebGPUNative, isWGSLCompatibleType[T](), l)
+
+	// 🚀 Try GPU offload if eligible
+	if n.WebGPUNative && isWGSLCompatibleType[T]() {
+		success := n.forwardLayerWebGPU(l)
+		//	elapsed := time.Since(start)
+		//	fmt.Printf("[gpu] forwardLayerWebGPU (layer %d) took %s\n", l, elapsed)
+		if success {
+			return
+		}
+		// 🔁 fallback if GPU fails
+		fmt.Println("⚠️ WebGPU fallback: GPU execution failed, using CPU path")
+	}
+
+	// 🧠 CPU fallback logic (original)
 	for y := 0; y < curr.Height; y++ {
 		for x := 0; x < curr.Width; x++ {
 			neuron := curr.Neurons[y][x]
@@ -271,12 +291,14 @@ func (n *Network[T]) forwardLayer(l int) {
 			neuron.Value = ApplyActivationGeneric(sum, neuron.Activation)
 
 			if n.Debug {
-				// Safe float64 cast for debug print
 				val := float64(any(neuron.Value).(T))
 				fmt.Printf("Layer %d, Neuron(%d,%d) = %.4f\n", l, x, y, val)
 			}
 		}
 	}
+
+	//elapsed := time.Since(start)
+	//fmt.Printf("[cpu] forwardLayer (layer %d) took %s\n", l, elapsed)
 }
 
 func (n *Network[T]) backwardLayer(
@@ -351,6 +373,13 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 	if len(inputs) != in.Height || len(inputs[0]) != in.Width {
 		panic(fmt.Sprintf("input mismatch: want %dx%d, got %dx%d",
 			in.Height, in.Width, len(inputs), len(inputs[0])))
+	}
+
+	if n.WebGPUNative && isWGSLCompatibleType[T]() {
+		if err := n.StartGPUProcess(); err != nil {
+			panic(fmt.Sprintf("failed to start GPU process: %v", err))
+		}
+		defer n.StopGPUProcess()
 	}
 
 	// Convert float64 input into T-typed neurons

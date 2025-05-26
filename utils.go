@@ -136,3 +136,16 @@ func calculateMaxVal[T any](numInputs int) uint64 {
 	}
 	return maxVal
 }
+
+func isWGSLCompatibleType[T any]() bool {
+	switch any(*new(T)).(type) {
+	case float32:
+		return true
+	case int32:
+		return true
+	case uint32:
+		return true
+	default:
+		return false
+	}
+}
