@@ -170,3 +170,15 @@ func applyActivationFloat32(value float32, activation string) float32 {
 		return value
 	}
 }
+
+// flatten2DF64 turns [][]float64 into one row-major []float64.
+func flatten2DF64(src [][]float64) []float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]float64, 0, len(src)*len(src[0]))
+	for _, r := range src {
+		out = append(out, r...)
+	}
+	return out
+}

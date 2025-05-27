@@ -60,129 +60,25 @@ type Network[T Numeric] struct {
 	ReplayStats  map[int][]int // layer index → replay counts per sample
 	WebGPUNative bool
 
-	instance        *wgpu.Instance
-	adapter         *wgpu.Adapter
-	device          *wgpu.Device
-	queue           *wgpu.Queue
-	shaderModule    *wgpu.ShaderModule
-	pipeline        *wgpu.ComputePipeline
-	bindGroupLayout *wgpu.BindGroupLayout
-}
+	gpu struct {
+		wBufs      []*wgpu.Buffer
+		bBufs      []*wgpu.Buffer
+		oBufs      []*wgpu.Buffer
+		pipel      []*wgpu.ComputePipeline
+		layout     []*wgpu.BindGroupLayout
+		inBuf      *wgpu.Buffer
+		computeBuf *wgpu.Buffer // NEW: Store compute buffer
+		stgBuf     *wgpu.Buffer
+		binds      []*wgpu.BindGroup
+		stgBufs    []*wgpu.Buffer
 
-func (n *Network[T]) InitWebGPU() error {
-	// Create instance
-	instance := wgpu.CreateInstance(nil)
-	adapter, err := instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to request adapter: %v", err)
-	}
-	device, err := adapter.RequestDevice(nil)
-	if err != nil {
-		adapter.Release()
-		instance.Release()
-		return fmt.Errorf("failed to request device: %v", err)
-	}
-	queue := device.GetQueue()
-
-	// Define a complex WGSL shader similar to the example
-	shader := `
-        @group(0) @binding(0) var<storage, read> inputs: array<f32>;
-        @group(0) @binding(1) var<storage, read> weights: array<f32>;
-        @group(0) @binding(2) var<storage, read> biases: array<f32>;
-        @group(0) @binding(3) var<storage, read_write> outputs: array<f32>;
-
-        @compute @workgroup_size(256)
-        fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-            let base_idx = id.x * 2u; // Process 2 outputs per thread
-            let out_dim = arrayLength(&biases);
-            let in_dim = arrayLength(&inputs);
-
-            for (var offset = 0u; offset < 2u; offset++) {
-                let out_idx = base_idx + offset;
-                if (out_idx >= out_dim) {
-                    break;
-                }
-
-                var sum: f32 = biases[out_idx];
-                for (var j = 0u; j < u32(in_dim); j = j + 1u) {
-                    sum += inputs[j] * weights[out_idx * u32(in_dim) + j];
-                }
-                // Apply ReLU as an example activation (could be parameterized)
-                outputs[out_idx] = max(sum, 0.0);
-            }
-        }
-    `
-	shaderModule, err := device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		Label: "dense_layer_shader",
-		WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{
-			Code: shader,
-		},
-	})
-	if err != nil {
-		queue.Release()
-		device.Release()
-		adapter.Release()
-		instance.Release()
-		return fmt.Errorf("failed to create shader module: %v", err)
-	}
-
-	pipeline, err := device.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
-		Compute: wgpu.ProgrammableStageDescriptor{
-			Module:     shaderModule,
-			EntryPoint: "main",
-		},
-	})
-	if err != nil {
-		shaderModule.Release()
-		queue.Release()
-		device.Release()
-		adapter.Release()
-		instance.Release()
-		return fmt.Errorf("failed to create compute pipeline: %v", err)
-	}
-
-	bindGroupLayout := pipeline.GetBindGroupLayout(0)
-
-	// Store resources in the Network struct
-	n.instance = instance
-	n.adapter = adapter
-	n.device = device
-	n.queue = queue
-	n.shaderModule = shaderModule
-	n.pipeline = pipeline
-	n.bindGroupLayout = bindGroupLayout
-
-	return nil
-}
-
-func (n *Network[T]) ReleaseWebGPU() {
-	if n.bindGroupLayout != nil {
-		n.bindGroupLayout.Release()
-		n.bindGroupLayout = nil
-	}
-	if n.pipeline != nil {
-		n.pipeline.Release()
-		n.pipeline = nil
-	}
-	if n.shaderModule != nil {
-		n.shaderModule.Release()
-		n.shaderModule = nil
-	}
-	if n.queue != nil {
-		n.queue.Release()
-		n.queue = nil
-	}
-	if n.device != nil {
-		n.device.Release()
-		n.device = nil
-	}
-	if n.adapter != nil {
-		n.adapter.Release()
-		n.adapter = nil
-	}
-	if n.instance != nil {
-		n.instance.Release()
-		n.instance = nil
+		// Batch processing
+		batchConstBuf  *wgpu.Buffer
+		batchInBuf     *wgpu.Buffer
+		batchOutBufs   []*wgpu.Buffer
+		batchStgBuf    *wgpu.Buffer
+		batchPipeline  *wgpu.ComputePipeline
+		batchBindGroup *wgpu.BindGroup
 	}
 }
 
@@ -205,8 +101,8 @@ func NewNetwork[T Numeric](
 		ReplayStats: make(map[int][]int),
 	}
 
-	if n.WebGPUNative {
-		n.InitWebGPU()
+	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
+		n.BuildGPUKernels()
 	}
 
 	idCounter := 0
@@ -384,54 +280,11 @@ func (n *Network[T]) ConnectLayers(fullyConnected []bool) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Low‑level helpers (identical logic to your originals)
-// ---------------------------------------------------------------------------
+// forwardLayer computes the forward pass for a layer
 func (n *Network[T]) forwardLayer(l int) {
 	curr := n.Layers[l]
-	if n.WebGPUNative && l > 0 && curr.Neurons[0][0].Type == "dense" {
-		var zero T
-		_, isFloat32 := any(zero).(float32)
-		if isFloat32 {
-			prevLayer := n.Layers[l-1]
-			inputSize := prevLayer.Width * prevLayer.Height
-			outputSize := curr.Width * curr.Height
 
-			// Flatten inputs
-			inputFlat := make([]float32, inputSize)
-			for y := 0; y < prevLayer.Height; y++ {
-				for x := 0; x < prevLayer.Width; x++ {
-					inputFlat[y*prevLayer.Width+x] = float32(any(prevLayer.Neurons[y][x].Value).(T))
-				}
-			}
-
-			// Flatten weights and biases
-			weights := make([]float32, outputSize*inputSize)
-			biases := make([]float32, outputSize)
-			for y := 0; y < curr.Height; y++ {
-				for x := 0; x < curr.Width; x++ {
-					neuron := curr.Neurons[y][x]
-					biases[y*curr.Width+x] = float32(any(neuron.Bias).(T))
-					for i, c := range neuron.Inputs {
-						weights[(y*curr.Width+x)*inputSize+i] = float32(any(c.Weight).(T))
-					}
-				}
-			}
-
-			// Compute using WebGPU
-			outputs := n.ForwardLayerWebGPU(inputFlat, weights, biases, outputSize, inputSize)
-
-			// Assign outputs back to neurons
-			for y := 0; y < curr.Height; y++ {
-				for x := 0; x < curr.Width; x++ {
-					curr.Neurons[y][x].Value = T(outputs[y*curr.Width+x])
-				}
-			}
-			return
-		}
-	}
-
-	// Fallback CPU path
+	// CPU fallback
 	for y := 0; y < curr.Height; y++ {
 		for x := 0; x < curr.Width; x++ {
 			neuron := curr.Neurons[y][x]
@@ -517,6 +370,25 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 	if len(inputs) != in.Height || len(inputs[0]) != in.Width {
 		panic(fmt.Sprintf("input mismatch: want %dx%d, got %dx%d",
 			in.Height, in.Width, len(inputs), len(inputs[0])))
+	}
+
+	// GPU forward-pass (float32 nets only)
+	if n.WebGPUNative && any(*new(T)).(T) == T(float32(0)) {
+		replayed := map[int]int{}
+
+		// Execute GPU computation with proper error handling
+		err := n.forwardGPUWithErrorHandling(inputs, replayed)
+		if err != nil {
+			if n.Debug {
+				fmt.Printf("GPU forward pass failed, falling back to CPU: %v\n", err)
+			}
+			// Fall back to CPU computation
+			n.WebGPUNative = false
+			n.Forward(inputs)
+			n.WebGPUNative = true
+			return
+		}
+		return
 	}
 
 	// Convert float64 input into T-typed neurons
