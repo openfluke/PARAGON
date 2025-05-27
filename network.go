@@ -79,6 +79,7 @@ type Network[T Numeric] struct {
 		batchStgBuf    *wgpu.Buffer
 		batchPipeline  *wgpu.ComputePipeline
 		batchBindGroup *wgpu.BindGroup
+		optimized      *GPUCompute
 	}
 }
 
@@ -364,7 +365,7 @@ func (n *Network[T]) backwardLayer(
 // ---------------------------------------------------------------------------
 // Forward pass with optional layer‑replay
 // ---------------------------------------------------------------------------
-func (n *Network[T]) Forward(inputs [][]float64) {
+func (n *Network[T]) forwardCPU(inputs [][]float64) {
 	in := n.Layers[n.InputLayer]
 
 	if len(inputs) != in.Height || len(inputs[0]) != in.Width {
