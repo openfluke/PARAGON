@@ -80,6 +80,7 @@ type Network[T Numeric] struct {
 		batchPipeline  *wgpu.ComputePipeline
 		batchBindGroup *wgpu.BindGroup
 		optimized      *GPUCompute
+		backward       *GPUBackwardCompute
 	}
 }
 
@@ -472,7 +473,7 @@ func (n *Network[T]) forwardCPU(inputs [][]float64) {
 // ---------------------------------------------------------------------------
 // Back‑prop with optional layer‑replay  (incl. attention weight update)
 // ---------------------------------------------------------------------------
-func (n *Network[T]) Backward(
+func (n *Network[T]) backwardCPU(
 	targets [][]float64,
 	lr float64,
 	clipUpper T,

@@ -182,3 +182,62 @@ func flatten2DF64(src [][]float64) []float64 {
 	}
 	return out
 }
+
+func minUint64(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Also add this int version if you need it elsewhere
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func minFloat32(arr []float32) float32 {
+	if len(arr) == 0 {
+		return 0
+	}
+	min := arr[0]
+	for _, v := range arr[1:] {
+		if v < min {
+			min = v
+		}
+	}
+	return min
+}
+
+func maxFloat32(arr []float32) float32 {
+	if len(arr) == 0 {
+		return 0
+	}
+	max := arr[0]
+	for _, v := range arr[1:] {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
+func avgFloat32(arr []float32) float32 {
+	if len(arr) == 0 {
+		return 0
+	}
+	sum := float32(0)
+	for _, v := range arr {
+		sum += v
+	}
+	return sum / float32(len(arr))
+}
+
+func abs(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
