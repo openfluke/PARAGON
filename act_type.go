@@ -118,25 +118,44 @@ func Sigmoid[T Numeric](x T) T {
 	return T(out)
 }
 
+// your f32‐only approx
+func Tanh32(x float32) float32 {
+	if x > 1.0 {
+		return 1.0
+	}
+	if x < -1.0 {
+		return -1.0
+	}
+	if x >= 0 {
+		if x < 0.25 {
+			return x
+		}
+		denom := 1.0 + x*2.0
+		return 1.0 - 2.0/denom
+	}
+	// x < 0
+	if x > -0.25 {
+		return x
+	}
+	a := -x
+	denom := 1.0 + a*2.0
+	return -1.0 + 2.0/denom
+}
+
+// single generic path—all types go through float32
 func Tanh[T Numeric](x T) T {
-	kind := reflect.TypeOf(x).Kind()
-	// floats: exact
-	if kind == reflect.Float32 || kind == reflect.Float64 {
-		f := float64(any(x).(T))
-		return T(math.Tanh(f))
+	// 1) convert *any* T → float32
+	f := float32(any(x).(T))
+	// 2) run your piecewise tanh
+	t := Tanh32(f)
+	// 3) if unsigned, clamp negative → 0
+	if _, ok := any(x).(uint32); ok {
+		if t < 0 {
+			t = 0
+		}
 	}
-	// integers: fixed-point
-	xi := int64(any(x).(T))
-	scale := getScaleForType[T]()
-	realX := float64(xi) / float64(scale)
-	t := math.Tanh(realX)
-	out := int64(math.Round(t * float64(scale)))
-	if out < -scale {
-		out = -scale
-	} else if out > scale {
-		out = scale
-	}
-	return T(out)
+	// 4) cast back to T (Go truncates float→int toward zero)
+	return T(t)
 }
 
 func LeakyReLU[T Numeric](x T) T {
@@ -148,20 +167,19 @@ func LeakyReLU[T Numeric](x T) T {
 		}
 		return T(f * 0.01)
 	}
-	// integers: small leak
+
+	// Pure integer implementation
 	xi := int64(any(x).(T))
 	if xi >= 0 {
 		return x
 	}
-	scale := getScaleForType[T]()
-	realX := float64(xi) / float64(scale)
-	leak := realX * 0.01
-	out := int64(math.Round(leak * float64(scale)))
-	min := -scale
-	if out < min {
-		out = min
+
+	// Apply 1% leak using integer division: x / 100
+	leak := xi / 100
+	if leak == 0 && xi < 0 {
+		leak = -1 // Ensure minimum leak for negative values
 	}
-	return T(out)
+	return T(leak)
 }
 
 func ELU[T Numeric](x T) T {
@@ -171,24 +189,23 @@ func ELU[T Numeric](x T) T {
 		if f >= 0 {
 			return x
 		}
-		return T(math.Exp(f) - 1)
+		return T(math.Exp(math.Max(f, -10.0)) - 1)
 	}
+
 	xi := int64(any(x).(T))
+	if xi >= 0 {
+		return x
+	}
+
 	scale := getScaleForType[T]()
-	realX := float64(xi) / float64(scale)
-	var e float64
-	if realX >= 0 {
-		e = realX
-	} else {
-		e = math.Exp(realX) - 1
+
+	// For negative values, use simplified approximation
+	if xi <= -scale {
+		return T(-scale) // Cap at -1.0 in fixed point
 	}
-	out := int64(math.Round(e * float64(scale)))
-	if out < -scale {
-		out = -scale
-	} else if out > scale {
-		out = scale
-	}
-	return T(out)
+
+	// Simple approximation: ELU(x) ≈ x/2 for negative x
+	return T(xi / 2)
 }
 
 func Linear[T Numeric](x T) T {

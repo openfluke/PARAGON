@@ -3,6 +3,7 @@ package paragon
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/rajveermalviya/go-webgpu/wgpu"
 )
@@ -35,8 +36,13 @@ type GPUCompute struct {
 
 // Initialize GPU compute for the network
 func (n *Network[T]) InitializeOptimizedGPU() error {
-	if any(*new(T)).(T) != T(float32(0)) {
-		return fmt.Errorf("GPU acceleration only supported for float32 networks")
+	typ := reflect.TypeOf(*new(T)).Kind()
+
+	switch typ {
+	case reflect.Float32, reflect.Int32, reflect.Uint32:
+		// Supported GPU types
+	default:
+		return fmt.Errorf("❌ WebGPU acceleration only supports f32, i32, or u32 numeric types — got: %v", typ)
 	}
 
 	ensureGPU()
@@ -280,65 +286,166 @@ func (lc *GPULayerCompute) cleanup() {
 func (n *Network[T]) generateLayerShader(layerIdx int, inputSize, outputSize uint32) string {
 	currentLayer := n.Layers[layerIdx]
 	activation := currentLayer.Neurons[0][0].Activation
-	activationCode := getActivationCode(activation)
+	typ := n.gpu.wgslType
+	activationCode := getActivationCode(activation, typ)
 
-	// Use specialized matrix multiplication shader
 	return fmt.Sprintf(`
-		@group(0) @binding(0) var<storage, read> input: array<f32>;
-		@group(0) @binding(1) var<storage, read_write> output: array<f32>;
-		@group(0) @binding(2) var<storage, read> weights: array<f32>;
-		@group(0) @binding(3) var<storage, read> biases: array<f32>;
+		@group(0) @binding(0) var<storage, read> input: array<%s>;
+		@group(0) @binding(1) var<storage, read_write> output: array<%s>;
+		@group(0) @binding(2) var<storage, read> weights: array<%s>;
+		@group(0) @binding(3) var<storage, read> biases: array<%s>;
 
 		%s
 
 		@compute @workgroup_size(256, 1, 1)
 		fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 			let output_idx = global_id.x;
-			
+
 			if (output_idx >= %du) {
 				return;
 			}
 
-			var sum: f32 = biases[output_idx];
-			
-			// Optimized matrix-vector multiplication
+			var sum: %s = biases[output_idx];
 			let weight_offset = output_idx * %du;
 			for (var i: u32 = 0u; i < %du; i++) {
 				sum += weights[weight_offset + i] * input[i];
 			}
-			
-			// Apply activation function
+
 			output[output_idx] = activate(sum);
 		}
-	`, activationCode, outputSize, inputSize, inputSize)
+	`, typ, typ, typ, typ, activationCode, outputSize, typ, inputSize, inputSize)
 }
 
+// relu,sigmoid,tanh,leaky_relu,elu,linear
 // Get activation function WGSL code
-func getActivationCode(activation string) string {
+func getActivationCode(activation, typ string) string {
 	switch activation {
 	case "relu":
-		return `fn activate(x: f32) -> f32 { return max(0.0, x); }`
+		return fmt.Sprintf(`fn activate(x: %s) -> %s { return max(%s(0), x); }`, typ, typ, typ)
+
 	case "leaky_relu":
-		return `fn activate(x: f32) -> f32 { return select(0.01 * x, x, x > 0.0); }`
-	case "sigmoid":
-		return `fn activate(x: f32) -> f32 { return 1.0 / (1.0 + exp(-x)); }`
+		if typ == "f32" {
+			return `fn activate(x: f32) -> f32 { return select(0.01 * x, x, x > 0.0); }`
+		}
+		if typ == "u32" {
+			return `fn activate(x: u32) -> u32 { return x; }`
+		}
+		// Pure integer leaky ReLU matching CPU
+		return `fn activate(x: i32) -> i32 {
+			if (x >= i32(0)) { 
+				return x; 
+			}
+			// Pure integer 1% leak: x / 100
+			var leak = x / i32(100);
+			if (leak == i32(0) && x < i32(0)) {
+				leak = i32(-1); // Minimum leak for negative values
+			}
+			return leak;
+		}`
+
+	case "elu":
+		if typ == "f32" {
+			return `fn activate(x: f32) -> f32 {
+				if (x >= 0.0) { return x; }
+				return exp(max(x, -10.0)) - 1.0;
+			}`
+		}
+		if typ == "u32" {
+			return `fn activate(x: u32) -> u32 { return x; }`
+		}
+		// Pure integer ELU approximation matching CPU
+		return `fn activate(x: i32) -> i32 {
+			if (x >= i32(0)) { 
+				return x; 
+			}
+			let scale = i32(2147483647);
+			if (x <= -scale) {
+				return -scale; // Cap at -1.0 in fixed point
+			}
+			// Simple approximation: ELU(x) ≈ x/2 for negative x
+			return x / i32(2);
+		}`
+
 	case "tanh":
-		return `fn activate(x: f32) -> f32 { return tanh(x); }`
+		// 1) the single piecewise approximation
+		const tanhApprox = `
+fn tanh_approx(input: f32) -> f32 {
+    if (input >  1.0) { return  1.0; }
+    if (input < -1.0) { return -1.0; }
+    if (input >= 0.0) {
+        if (input < 0.25) { return input; }
+        let denom = 1.0 + input * 2.0;
+        return 1.0 - 2.0 / denom;
+    } else {
+        if (input > -0.25) { return input; }
+        let abs_input = -input;
+        let denom = 1.0 + abs_input * 2.0;
+        return -1.0 + 2.0 / denom;
+    }
+}
+`
+
+		// 2) f32 is trivial
+		if typ == "f32" {
+			return tanhApprox + `
+fn activate(x: f32) -> f32 {
+    return tanh_approx(x);
+}`
+		}
+
+		// 3) i32: cast to f32, approx, cast back (truncates toward zero exactly like Go’s conversion)
+		if typ == "i32" || typ == "int32" {
+			return tanhApprox + `
+fn activate(x: i32) -> i32 {
+    return i32(tanh_approx(f32(x)));
+}`
+		}
+
+		// 4) u32: cast to f32, approx, clamp negative→0, cast back
+		if typ == "u32" || typ == "uint32" {
+			return tanhApprox + `
+fn activate(x: u32) -> u32 {
+    let t = tanh_approx(f32(x));
+    // clamp any negative result to zero before casting
+    return u32(max(t, 0.0));
+}`
+		}
+
+		// 5) everything else falls back to identity
+		return fmt.Sprintf(`fn activate(x: %s) -> %s { return x; }`, typ, typ)
+
+	case "sigmoid":
+		if typ == "f32" {
+			return `fn activate(x: f32) -> f32 { return 1.0 / (1.0 + exp(-x)); }`
+		}
+		if typ == "u32" {
+			return `fn activate(x: u32) -> u32 {
+				let scaled = f32(x) / f32(2147483647);
+				let s = 1.0 / (1.0 + exp(-scaled * 0.5));
+				return u32(round(s * f32(2147483647) * 2.0));
+			}`
+		}
+		return `fn activate(x: i32) -> i32 {
+			let scaled = f32(x) / f32(2147483647);
+			let s = 1.0 / (1.0 + exp(-scaled));
+			return i32(round(s * f32(2147483647)));
+		}`
+
 	default:
-		return `fn activate(x: f32) -> f32 { return x; }`
+		return fmt.Sprintf(`fn activate(x: %s) -> %s { return x; }`, typ, typ)
 	}
 }
 
 // Extract weights and biases for a specific layer
-func (n *Network[T]) extractLayerWeightsAndBiases(layerIdx int) ([]float32, []float32) {
+func (n *Network[T]) extractLayerWeightsAndBiases(layerIdx int) ([]T, []T) {
 	currentLayer := n.Layers[layerIdx]
 	prevLayer := n.Layers[layerIdx-1]
 
 	inputSize := prevLayer.Width * prevLayer.Height
 	outputSize := currentLayer.Width * currentLayer.Height
 
-	weights := make([]float32, outputSize*inputSize)
-	biases := make([]float32, outputSize)
+	weights := make([]T, outputSize*inputSize)
+	biases := make([]T, outputSize)
 
 	for y := 0; y < currentLayer.Height; y++ {
 		for x := 0; x < currentLayer.Width; x++ {
@@ -346,13 +453,13 @@ func (n *Network[T]) extractLayerWeightsAndBiases(layerIdx int) ([]float32, []fl
 			neuron := currentLayer.Neurons[y][x]
 
 			// Extract bias
-			biases[neuronIdx] = float32(any(neuron.Bias).(T))
+			biases[neuronIdx] = T(any(neuron.Bias).(T))
 
 			// Extract weights in proper order for matrix multiplication
 			weightOffset := neuronIdx * inputSize
 			for i, conn := range neuron.Inputs {
 				if i < inputSize {
-					weights[weightOffset+i] = float32(any(conn.Weight).(T))
+					weights[weightOffset+i] = T(any(conn.Weight).(T))
 				}
 			}
 		}
@@ -367,11 +474,11 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 		return fmt.Errorf("optimized GPU not initialized")
 	}
 
-	// Convert input to float32
-	inputData := make([]float32, 0, len(inputs)*len(inputs[0]))
+	var inputData []T
+	inputData = make([]T, 0, len(inputs)*len(inputs[0]))
 	for _, row := range inputs {
 		for _, val := range row {
-			inputData = append(inputData, float32(val))
+			inputData = append(inputData, T(val))
 		}
 	}
 
@@ -382,11 +489,11 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 	}
 
 	// Process each layer sequentially but with full GPU parallelization within each layer
-	var currentInput []float32 = inputData
+	//var currentInput []T = inputData
 
 	for i, layerCompute := range n.gpu.optimized.layers {
 		// Upload input data to GPU
-		ctx.queue.WriteBuffer(layerCompute.inputBuffer, 0, wgpu.ToBytes(currentInput))
+		ctx.queue.WriteBuffer(layerCompute.inputBuffer, 0, wgpu.ToBytes(inputData))
 
 		// Create compute pass for this layer
 		computePass := encoder.BeginComputePass(&wgpu.ComputePassDescriptor{
@@ -446,7 +553,7 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 }
 
 // Read data from staging buffer with proper synchronization
-func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]float32, error) {
+func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]T, error) {
 	done := make(chan wgpu.BufferMapAsyncStatus, 1)
 
 	err := buffer.MapAsync(wgpu.MapMode_Read, 0, buffer.GetSize(),
@@ -478,28 +585,25 @@ readData:
 		return nil, fmt.Errorf("failed to get mapped range")
 	}
 
-	result := make([]float32, size)
-	copy(result, wgpu.FromBytes[float32](data))
+	result := make([]T, size)
+	copy(result, wgpu.FromBytes[T](data))
 	buffer.Unmap()
 
 	return result, nil
 }
 
 // Apply final GPU output to network neurons
-func (n *Network[T]) applyFinalOutput(output []float32) {
+func (n *Network[T]) applyFinalOutput(output []T) {
 	outputLayer := &n.Layers[n.OutputLayer]
 	idx := 0
-
 	for y := 0; y < outputLayer.Height; y++ {
 		for x := 0; x < outputLayer.Width; x++ {
 			if idx < len(output) {
-				outputLayer.Neurons[y][x].Value = T(output[idx])
+				outputLayer.Neurons[y][x].Value = output[idx]
 				idx++
 			}
 		}
 	}
-
-	// Apply softmax if needed
 	if outputLayer.Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}

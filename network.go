@@ -59,8 +59,9 @@ type Network[T Numeric] struct {
 	Composite    *CompositePerformance
 	ReplayStats  map[int][]int // layer index → replay counts per sample
 	WebGPUNative bool
-
-	gpu struct {
+	SCALE        int64
+	gpu          struct {
+		wgslType   string
 		wBufs      []*wgpu.Buffer
 		bBufs      []*wgpu.Buffer
 		oBufs      []*wgpu.Buffer
@@ -101,6 +102,9 @@ func NewNetwork[T Numeric](
 		Performance: NewADHDPerformance(),
 		ReplayStats: make(map[int][]int),
 	}
+
+	// Set the WGSL type in the gpu struct based on T
+	n.gpu.wgslType = getWGSLType[T]()
 
 	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
 		n.BuildGPUKernels()
