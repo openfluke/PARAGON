@@ -5,6 +5,8 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+
+	"github.com/rajveermalviya/go-webgpu/wgpu"
 )
 
 // Grid represents a 2D layer of neurons
@@ -48,14 +50,38 @@ type Connection[T Numeric] struct {
 
 // Network encapsulates the entire model
 type Network[T Numeric] struct {
-	Layers      []Grid[T]
-	InputLayer  int
-	OutputLayer int
-	Debug       bool
-	TypeName    string
-	Performance *ADHDPerformance
-	Composite   *CompositePerformance
-	ReplayStats map[int][]int // layer index → replay counts per sample
+	Layers       []Grid[T]
+	InputLayer   int
+	OutputLayer  int
+	Debug        bool
+	TypeName     string
+	Performance  *ADHDPerformance
+	Composite    *CompositePerformance
+	ReplayStats  map[int][]int // layer index → replay counts per sample
+	WebGPUNative bool
+	SCALE        int64
+	gpu          struct {
+		wgslType   string
+		wBufs      []*wgpu.Buffer
+		bBufs      []*wgpu.Buffer
+		oBufs      []*wgpu.Buffer
+		pipel      []*wgpu.ComputePipeline
+		layout     []*wgpu.BindGroupLayout
+		inBuf      *wgpu.Buffer
+		computeBuf *wgpu.Buffer // NEW: Store compute buffer
+		stgBuf     *wgpu.Buffer
+		binds      []*wgpu.BindGroup
+		stgBufs    []*wgpu.Buffer
+
+		// Batch processing
+		batchConstBuf  *wgpu.Buffer
+		batchInBuf     *wgpu.Buffer
+		batchOutBufs   []*wgpu.Buffer
+		batchStgBuf    *wgpu.Buffer
+		batchPipeline  *wgpu.ComputePipeline
+		batchBindGroup *wgpu.BindGroup
+		optimized      *GPUCompute
+	}
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -75,6 +101,13 @@ func NewNetwork[T Numeric](
 		OutputLayer: len(layerSizes) - 1,
 		Performance: NewADHDPerformance(),
 		ReplayStats: make(map[int][]int),
+	}
+
+	// Set the WGSL type in the gpu struct based on T
+	n.gpu.wgslType = getWGSLType[T]()
+
+	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
+		n.BuildGPUKernels()
 	}
 
 	idCounter := 0
@@ -252,29 +285,20 @@ func (n *Network[T]) ConnectLayers(fullyConnected []bool) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Low‑level helpers (identical logic to your originals)
-// ---------------------------------------------------------------------------
+// forwardLayer computes the forward pass for a layer
 func (n *Network[T]) forwardLayer(l int) {
 	curr := n.Layers[l]
 
+	// CPU fallback
 	for y := 0; y < curr.Height; y++ {
 		for x := 0; x < curr.Width; x++ {
 			neuron := curr.Neurons[y][x]
 			sum := neuron.Bias
-
 			for _, c := range neuron.Inputs {
 				src := n.Layers[c.SourceLayer].Neurons[c.SourceY][c.SourceX]
 				sum += src.Value * c.Weight
 			}
-
 			neuron.Value = ApplyActivationGeneric(sum, neuron.Activation)
-
-			if n.Debug {
-				// Safe float64 cast for debug print
-				val := float64(any(neuron.Value).(T))
-				fmt.Printf("Layer %d, Neuron(%d,%d) = %.4f\n", l, x, y, val)
-			}
 		}
 	}
 }
@@ -345,12 +369,31 @@ func (n *Network[T]) backwardLayer(
 // ---------------------------------------------------------------------------
 // Forward pass with optional layer‑replay
 // ---------------------------------------------------------------------------
-func (n *Network[T]) Forward(inputs [][]float64) {
+func (n *Network[T]) forwardCPU(inputs [][]float64) {
 	in := n.Layers[n.InputLayer]
 
 	if len(inputs) != in.Height || len(inputs[0]) != in.Width {
 		panic(fmt.Sprintf("input mismatch: want %dx%d, got %dx%d",
 			in.Height, in.Width, len(inputs), len(inputs[0])))
+	}
+
+	// GPU forward-pass (float32 nets only)
+	if n.WebGPUNative && any(*new(T)).(T) == T(float32(0)) {
+		replayed := map[int]int{}
+
+		// Execute GPU computation with proper error handling
+		err := n.forwardGPUWithErrorHandling(inputs, replayed)
+		if err != nil {
+			if n.Debug {
+				fmt.Printf("GPU forward pass failed, falling back to CPU: %v\n", err)
+			}
+			// Fall back to CPU computation
+			n.WebGPUNative = false
+			n.Forward(inputs)
+			n.WebGPUNative = true
+			return
+		}
+		return
 	}
 
 	// Convert float64 input into T-typed neurons

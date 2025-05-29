@@ -136,3 +136,83 @@ func calculateMaxVal[T any](numInputs int) uint64 {
 	}
 	return maxVal
 }
+
+func softmax32(in []float32) []float32 {
+	maxVal := in[0]
+	for _, v := range in {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	expSum := float32(0.0)
+	for _, v := range in {
+		expSum += float32(math.Exp(float64(v - maxVal)))
+	}
+	out := make([]float32, len(in))
+	for i, v := range in {
+		out[i] = float32(math.Exp(float64(v-maxVal))) / expSum
+	}
+	return out
+}
+
+func applyActivationFloat32(value float32, activation string) float32 {
+	switch activation {
+	case "relu":
+		if value > 0 {
+			return value
+		}
+		return 0
+	case "sigmoid":
+		return 1 / (1 + float32(math.Exp(-float64(value))))
+	case "tanh":
+		return float32(math.Tanh(float64(value)))
+	default:
+		return value
+	}
+}
+
+// flatten2DF64 turns [][]float64 into one row-major []float64.
+func flatten2DF64(src [][]float64) []float64 {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]float64, 0, len(src)*len(src[0]))
+	for _, r := range src {
+		out = append(out, r...)
+	}
+	return out
+}
+
+// getWGSLType returns the WGSL type string for the given Go numeric type
+func getWGSLType[T Numeric]() string {
+	var t T
+	switch any(t).(type) {
+	case float32:
+		return "f32"
+	case float64:
+		return "f32" // WebGPU doesn't support f64, use f32
+	case int32:
+		return "i32"
+	case uint32:
+		return "u32"
+	case int:
+		return "i32" // Assume 32-bit int
+	case uint:
+		return "u32" // Assume 32-bit uint
+	case int8, int16:
+		return "i32" // Promote smaller ints to i32
+	case uint8, uint16:
+		return "u32" // Promote smaller uints to u32
+	case int64:
+		return "i32" // Demote to i32 for WebGPU compatibility
+	case uint64:
+		return "u32" // Demote to u32 for WebGPU compatibility
+	default:
+		return "f32" // Default fallback
+	}
+}
+
+func roundToEven(x float64) float64 {
+	// math.RoundToEven introduced in Go1.10
+	return math.RoundToEven(x)
+}
