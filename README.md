@@ -4,6 +4,21 @@
 
 Paragon is a high-performance neural network framework written in Go, designed for building resilient and adaptive AI models. It supports dynamic network modification, novel training techniques like replay mechanisms, and a unique Accuracy Deviation Heatmap Distribution (ADHD) metric for performance evaluation. With extensive numerical type support, fixed-point arithmetic, and now WebGPU-accelerated forward passing, Paragon is ideal for research and deployment on diverse platforms, including edge devices and GPU-enabled environments.
 
+# Getting Started with Paragon 🚀
+
+Paragon-MNIST-CrossBench is a ready-to-run example to test Paragon on real data with GPU acceleration. Here's what it offers:
+
+- 🔹 **Trains and benchmarks** a float32 neural network on the MNIST dataset
+- 🔹 **Supports multiple numeric types** (e.g., float32, int32, uint32)
+- 🔹 **Runs inference** on CPU or WebGPU (enable via `.WebGPUNative = true`)
+- 🔹 **Saves/loads .json models** using Paragon’s native serialization
+- 🔹 **Cross-platform builds** with test results for Windows and Linux
+- 🔹 **Minimal samples** by default for fast experimentation (controlled by `trainLimit`)
+
+## Explore the Project
+Check out the repository for code, setup instructions, and more:  
+👉 [Paragon-MNIST-CrossBench](https://github.com/openfluke/Paragon-MNIST-CrossBench)
+
 ## Current Implementation
 
 Paragon is actively developed and supports foundational neural network architectures with the following capabilities:
