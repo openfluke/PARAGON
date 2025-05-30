@@ -1,4 +1,4 @@
-module github.com/OpenFluke/PARAGON
+module github.com/openfluke/paragon
 
 go 1.24.0
 
