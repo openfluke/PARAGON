@@ -29,8 +29,9 @@ type GrowConfig struct {
 	ValidationSplit   float64 // Fraction of data for validation (default: 0.2)
 
 	// Debug options
-	Debug           bool // Enable debug output
-	SaveCheckpoints bool // Save checkpoint data for analysis
+	Debug              bool // Enable debug output
+	SaveCheckpoints    bool // Save checkpoint data for analysis
+	UseGPUForMicroNets bool
 }
 
 // DefaultGrowConfig returns a GrowConfig with sensible defaults for ADHD-based growth
@@ -50,6 +51,8 @@ func DefaultGrowConfig() *GrowConfig {
 		ValidationSplit:      0.2,
 		Debug:                true,
 		SaveCheckpoints:      false,
+		UseGPUForMicroNets:   true, // New: enable GPU by default
+
 	}
 }
 
@@ -105,8 +108,9 @@ func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*G
 	}
 
 	// Step 1: Evaluate current ADHD performance
-	originalADHDScore := n.evaluateADHDScore(inputs, targets)
+	originalADHDScore := n.EvaluateFullScore(inputs, targets)
 	result.OriginalADHDScore = originalADHDScore
+	fmt.Println("OriginalADHDScore: ", result.OriginalADHDScore)
 
 	if config.Debug {
 		fmt.Printf("📈 Original network ADHD score: %.4f\n", originalADHDScore)
@@ -199,7 +203,7 @@ func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*G
 		}
 
 		// Evaluate improved network with full ADHD analysis
-		improvedADHDScore := n.evaluateADHDScore(inputs, targets)
+		improvedADHDScore := n.EvaluateFullScore(inputs, targets)
 		result.ImprovedADHDScore = improvedADHDScore
 		result.ADHDImprovement = improvedADHDScore - originalADHDScore
 
@@ -415,6 +419,14 @@ func (n *Network[T]) processMicroNetBatchADHD(batch *CheckpointBatch, config *Gr
 		// Try adding a layer
 		improvedMicroNet := n.tryAddingLayerToMicroNet(microNet, config)
 
+		if config.UseGPUForMicroNets {
+			improvedMicroNet.Network.WebGPUNative = true
+			if err := improvedMicroNet.Network.InitializeOptimizedGPU(); err != nil && config.Debug {
+				fmt.Printf("⚠️  Failed to init GPU for micro net: %v\n", err)
+			}
+			defer improvedMicroNet.Network.CleanupOptimizedGPU()
+		}
+
 		// Train the improved micro network for 1 epoch as requested
 		n.trainMicroNetOnBatchADHD(improvedMicroNet, batch, config)
 
@@ -455,42 +467,44 @@ func (n *Network[T]) evaluateMicroNetADHD(microNet *MicroNetwork[T], batch *Chec
 
 // trainMicroNetOnBatchADHD trains a micro network for exactly 1 epoch
 func (n *Network[T]) trainMicroNetOnBatchADHD(microNet *MicroNetwork[T], batch *CheckpointBatch, config *GrowConfig) {
-	// Simple approach: use safe clipping values
+	if config.TrainingEpochs <= 0 {
+		if config.Debug {
+			fmt.Println("   ⏩ Skipping micro net training (TrainingEpochs = 0)")
+		}
+		return
+	}
+
 	var clipUpper, clipLower T
 	var zero T
 
-	// Set reasonable clipping bounds
-	clipUpper = zero + T(1) // Always safe
-	clipLower = zero        // Start with zero (safe for unsigned)
+	// Set clipping bounds
+	clipUpper = zero + T(1) // Always safe upper
+	clipLower = zero        // Default lower for unsigned
 
-	// Try to set negative lower bound for signed types
-	// Use a simple test to avoid panic
 	defer func() {
 		if recover() != nil {
-			clipLower = zero // Keep zero if panic occurs
+			clipLower = zero
 		}
 	}()
 
-	// Test arithmetic to detect signed vs unsigned
+	// Attempt to detect signed type
 	testVal := zero - T(1)
-	_ = testVal             // Avoid unused variable warning
-	clipLower = zero - T(1) // If we get here, signed type is OK
+	_ = testVal
+	clipLower = zero - T(1)
 
-	// Count successful training steps for debugging
 	trainedSamples := 0
 
-	// Train for exactly 1 epoch as requested
-	for i := range batch.States {
-		// Forward from checkpoint
-		microNet.Network.ForwardFromLayer(microNet.CheckpointIdx, batch.States[i])
-
-		// Backward pass with type-appropriate clipping
-		microNet.Network.Backward(batch.Targets[i], config.LearningRate, clipUpper, clipLower)
-		trainedSamples++
+	for epoch := 0; epoch < config.TrainingEpochs; epoch++ {
+		for i := range batch.States {
+			microNet.Network.ForwardFromLayer(microNet.CheckpointIdx, batch.States[i])
+			microNet.Network.Backward(batch.Targets[i], config.LearningRate, clipUpper, clipLower)
+			trainedSamples++
+		}
 	}
 
 	if config.Debug && trainedSamples > 0 {
-		fmt.Printf("   🎓 Trained micro net on %d samples with lr=%.3f\n", trainedSamples, config.LearningRate)
+		fmt.Printf("   🎓 Trained micro net for %d epoch(s) on %d samples with lr=%.3f\n",
+			config.TrainingEpochs, trainedSamples, config.LearningRate)
 	}
 }
 
@@ -543,4 +557,19 @@ func (n *Network[T]) calculateSampleAccuracy(output, target []float64) float64 {
 		return 1.0
 	}
 	return 0.0
+}
+
+func (n *Network[T]) EvaluateFullScore(inputs, targets [][][]float64) float64 {
+	expected := make([]float64, len(inputs))
+	actual := make([]float64, len(inputs))
+
+	for i := range inputs {
+		n.Forward(inputs[i])
+		out := n.GetOutput()
+		expected[i] = float64(ArgMax(targets[i][0]))
+		actual[i] = float64(ArgMax(out))
+	}
+
+	n.EvaluateFull(expected, actual)
+	return n.Performance.Score
 }
