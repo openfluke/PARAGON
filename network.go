@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"reflect"
 
-	"github.com/rajveermalviya/go-webgpu/wgpu"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 // Grid represents a 2D layer of neurons

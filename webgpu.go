@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/rajveermalviya/go-webgpu/wgpu"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 type gpuContext struct {
@@ -146,7 +146,7 @@ func (n *Network[T]) BuildGPUKernels() {
 	var err error
 	n.gpu.inBuf, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Size:  uint64(inElems) * 4,
-		Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create input buffer: %v", err))
@@ -178,13 +178,13 @@ func (n *Network[T]) BuildGPUKernels() {
 				b[y*cur.Width+x] = float32(any(cur.Neurons[y][x].Bias).(T))
 			}
 		}
-		n.gpu.wBufs = append(n.gpu.wBufs, newFloatBuf(w, wgpu.BufferUsage_Storage))
-		n.gpu.bBufs = append(n.gpu.bBufs, newFloatBuf(b, wgpu.BufferUsage_Storage))
+		n.gpu.wBufs = append(n.gpu.wBufs, newFloatBuf(w, wgpu.BufferUsageStorage))
+		n.gpu.bBufs = append(n.gpu.bBufs, newFloatBuf(b, wgpu.BufferUsageStorage))
 
 		// Create output buffer
 		n.gpu.oBufs[l-1], err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 			Size:  uint64(out) * 4,
-			Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopySrc,
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
 		})
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create output buffer for layer %d: %v", l-1, err))
@@ -193,7 +193,7 @@ func (n *Network[T]) BuildGPUKernels() {
 		// Create staging buffer (FIX: this was creating oBufs twice)
 		n.gpu.stgBufs[l-1], err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 			Size:  uint64(out) * 4,
-			Usage: wgpu.BufferUsage_MapRead | wgpu.BufferUsage_CopyDst,
+			Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
 		})
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create staging buffer for layer %d: %v", l-1, err))
@@ -455,9 +455,9 @@ func (n *Network[T]) TestGPUDirect(inputs [][]float64) {
 		done := make(chan bool)
 		var mapErr error
 
-		err = result.MapAsync(wgpu.MapMode_Read, 0, result.GetSize(),
+		err = result.MapAsync(wgpu.MapModeRead, 0, result.GetSize(),
 			func(status wgpu.BufferMapAsyncStatus) {
-				if status == wgpu.BufferMapAsyncStatus_Success {
+				if status == wgpu.BufferMapAsyncStatusSuccess {
 					fmt.Println("Buffer mapped successfully")
 				} else {
 					mapErr = fmt.Errorf("map failed with status: %v", status)
@@ -503,7 +503,7 @@ func (n *Network[T]) readGPUResultsSafe() ([][]float32, error) {
 		// Map buffer with timeout and error handling
 		mapped := make(chan wgpu.BufferMapAsyncStatus, 1)
 
-		err := buf.MapAsync(wgpu.MapMode_Read, 0, buf.GetSize(),
+		err := buf.MapAsync(wgpu.MapModeRead, 0, buf.GetSize(),
 			func(status wgpu.BufferMapAsyncStatus) {
 				mapped <- status
 			})
@@ -518,7 +518,7 @@ func (n *Network[T]) readGPUResultsSafe() ([][]float32, error) {
 			ctx.device.Poll(true, nil)
 			select {
 			case status := <-mapped:
-				if status != wgpu.BufferMapAsyncStatus_Success {
+				if status != wgpu.BufferMapAsyncStatusSuccess {
 					return nil, fmt.Errorf("buffer mapping failed for layer %d: %v", l, status)
 				}
 				goto readBuffer
