@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"time"
 
 	"github.com/openfluke/webgpu/wgpu"
 )
@@ -936,4 +937,77 @@ func (n *Network[T]) LogReplay(l int, count int) {
 		n.ReplayStats[l] = []int{}
 	}
 	n.ReplayStats[l] = append(n.ReplayStats[l], count)
+}
+
+func NewNetworkRandomized[T Numeric](
+	layerSizes []struct{ Width, Height int },
+	activationPool []string,
+	fullyConnected []bool,
+) *Network[T] {
+	if len(layerSizes) != len(fullyConnected) {
+		panic("mismatched layer sizes and connectivity settings")
+	}
+
+	n := &Network[T]{
+		TypeName:    reflect.TypeOf(*new(T)).Name(),
+		Layers:      make([]Grid[T], len(layerSizes)),
+		InputLayer:  0,
+		OutputLayer: len(layerSizes) - 1,
+		Performance: NewADHDPerformance(),
+		ReplayStats: make(map[int][]int),
+	}
+
+	n.gpu.wgslType = getWGSLType[T]()
+	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
+		n.BuildGPUKernels()
+	}
+
+	idCounter := 0
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	defaultActs := []string{"relu", "sigmoid", "tanh", "leaky_relu", "elu", "linear"}
+
+	for i, size := range layerSizes {
+		grid := Grid[T]{
+			Width:   size.Width,
+			Height:  size.Height,
+			Neurons: make([][]*Neuron[T], size.Height),
+		}
+		for y := 0; y < size.Height; y++ {
+			grid.Neurons[y] = make([]*Neuron[T], size.Width)
+			for x := 0; x < size.Width; x++ {
+				act := "relu"
+				if len(activationPool) > 0 {
+					act = activationPool[rng.Intn(len(activationPool))]
+				} else {
+					act = defaultActs[rng.Intn(len(defaultActs))]
+				}
+
+				grid.Neurons[y][x] = &Neuron[T]{
+					ID:         idCounter,
+					Bias:       T(rng.Float64()*2 - 1), // [-1, 1]
+					Activation: act,
+					Type:       "dense",
+				}
+				idCounter++
+			}
+		}
+		n.Layers[i] = grid
+	}
+
+	// Connect layers using either full or local connectivity
+	n.ConnectLayers(fullyConnected)
+
+	// Randomize weights in each connection
+	for layer := 1; layer < len(n.Layers); layer++ {
+		for y := range n.Layers[layer].Neurons {
+			for x := range n.Layers[layer].Neurons[y] {
+				neuron := n.Layers[layer].Neurons[y][x]
+				for i := range neuron.Inputs {
+					neuron.Inputs[i].Weight = T(rng.Float64()*2 - 1) // [-1, 1]
+				}
+			}
+		}
+	}
+
+	return n
 }

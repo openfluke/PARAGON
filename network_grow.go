@@ -32,6 +32,10 @@ type GrowConfig struct {
 	Debug              bool // Enable debug output
 	SaveCheckpoints    bool // Save checkpoint data for analysis
 	UseGPUForMicroNets bool
+
+	PrintAllScores bool        // Optional: log all candidate ADHD scores per iteration
+	AllScores      [][]float64 // Stores per-growth attempt candidate ADHD scores
+
 }
 
 // DefaultGrowConfig returns a GrowConfig with sensible defaults for ADHD-based growth
@@ -52,7 +56,8 @@ func DefaultGrowConfig() *GrowConfig {
 		Debug:                true,
 		SaveCheckpoints:      false,
 		UseGPUForMicroNets:   true, // New: enable GPU by default
-
+		PrintAllScores:       false,
+		AllScores:            [][]float64{},
 	}
 }
 
@@ -91,6 +96,11 @@ type MicroNetCandidate[T Numeric] struct {
 func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*GrowthResult, error) {
 	if config == nil {
 		config = DefaultGrowConfig()
+	}
+
+	// 🔽 Reset scores list if logging is enabled
+	if config.PrintAllScores {
+		config.AllScores = [][]float64{}
 	}
 
 	startTime := time.Now()
@@ -162,8 +172,32 @@ func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*G
 		}
 
 		// Process micro networks for this batch
-		candidates := n.processMicroNetBatchADHD(batch, config)
+		candidates := n.processMicroNetBatchADHD(batch, config, originalADHDScore)
+
+		// Capture all ADHD scores if requested
+		if config.PrintAllScores {
+			scores := make([]float64, len(candidates))
+			for i, c := range candidates {
+				scores[i] = c.ADHDScore
+			}
+			config.AllScores = append(config.AllScores, scores)
+		}
+
+		if config.PrintAllScores {
+			fmt.Println("🧠 ADHD Scores by Growth Attempt:")
+			for i, scores := range config.AllScores {
+				fmt.Printf("  Iteration %d: ", i+1)
+				for _, s := range scores {
+					fmt.Printf("%.2f ", s)
+				}
+				fmt.Println()
+			}
+		}
+
 		totalMicroNets += len(candidates)
+
+		var bestScore float64 = -1e9
+		var worstScore float64 = 1e9
 
 		// Find best candidate based on ADHD improvement
 		for _, candidate := range candidates {
@@ -172,6 +206,19 @@ func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*G
 				bestMicroNet = candidate.MicroNet
 				result.BestMicroNetScore = candidate.ADHDScore
 			}
+			if candidate.ADHDScore > bestScore {
+				bestScore = candidate.ADHDScore
+			}
+			if candidate.ADHDScore < worstScore {
+				worstScore = candidate.ADHDScore
+			}
+		}
+
+		if config.Debug {
+			fmt.Printf("📊 Batch processed: %d candidates\n", len(candidates))
+			fmt.Printf("   🌟 Best ADHD score: %.4f\n", bestScore)
+			fmt.Printf("   🪦 Worst ADHD score: %.4f\n", worstScore)
+			fmt.Printf("   📈 Best improvement over baseline: %.4f\n", bestADHDImprovement)
 		}
 
 		if config.Debug {
@@ -180,9 +227,11 @@ func (n *Network[T]) Grow(inputs, targets [][][]float64, config *GrowConfig) (*G
 		}
 
 		// Check if we have sufficient ADHD improvement
-		if bestADHDImprovement >= config.ImprovementThreshold {
+		// Ensure bestMicroNet is retained across iterations
+		if bestMicroNet != nil && bestADHDImprovement >= config.ImprovementThreshold {
 			break
 		}
+
 	}
 
 	result.MicroNetsProcessed = totalMicroNets
@@ -405,12 +454,8 @@ func (n *Network[T]) createADHDCheckpointBatch(inputs, targets [][][]float64, po
 }
 
 // processMicroNetBatchADHD processes micro networks with ADHD evaluation
-func (n *Network[T]) processMicroNetBatchADHD(batch *CheckpointBatch, config *GrowConfig) []*MicroNetCandidate[T] {
+func (n *Network[T]) processMicroNetBatchADHD(batch *CheckpointBatch, config *GrowConfig, originalADHDScore float64) []*MicroNetCandidate[T] {
 	var candidates []*MicroNetCandidate[T]
-
-	// Get baseline ADHD score
-	baseMicroNet := n.ExtractMicroNetwork(batch.Layer)
-	baseADHDScore := n.evaluateMicroNetADHD(baseMicroNet, batch)
 
 	for i := 0; i < config.MicroNetCount; i++ {
 		// Extract base micro network
@@ -419,6 +464,7 @@ func (n *Network[T]) processMicroNetBatchADHD(batch *CheckpointBatch, config *Gr
 		// Try adding a layer
 		improvedMicroNet := n.tryAddingLayerToMicroNet(microNet, config)
 
+		// Enable GPU if configured
 		if config.UseGPUForMicroNets {
 			improvedMicroNet.Network.WebGPUNative = true
 			if err := improvedMicroNet.Network.InitializeOptimizedGPU(); err != nil && config.Debug {
@@ -427,18 +473,20 @@ func (n *Network[T]) processMicroNetBatchADHD(batch *CheckpointBatch, config *Gr
 			defer improvedMicroNet.Network.CleanupOptimizedGPU()
 		}
 
-		// Train the improved micro network for 1 epoch as requested
+		// Train the improved micro network
 		n.trainMicroNetOnBatchADHD(improvedMicroNet, batch, config)
 
-		// Evaluate performance with ADHD
+		// Evaluate ADHD score on the micro-network
 		adhdScore := n.evaluateMicroNetADHD(improvedMicroNet, batch)
-		adhdImprovement := adhdScore - baseADHDScore
+
+		// Compare directly against the original full-model ADHD score
+		adhdImprovement := adhdScore - originalADHDScore
 
 		candidate := &MicroNetCandidate[T]{
 			MicroNet:        improvedMicroNet,
 			ADHDScore:       adhdScore,
 			ADHDImprovement: adhdImprovement,
-			TrainingLoss:    0.0, // Not tracking loss, focusing on ADHD
+			TrainingLoss:    0.0, // Optional: track loss later if needed
 		}
 
 		candidates = append(candidates, candidate)
@@ -455,14 +503,13 @@ func (n *Network[T]) evaluateMicroNetADHD(microNet *MicroNetwork[T], batch *Chec
 	for i := range batch.States {
 		microNet.Network.ForwardFromLayer(microNet.CheckpointIdx, batch.States[i])
 		output := microNet.Network.GetOutput()
-
 		expectedOutputs[i] = float64(ArgMax(batch.Targets[i][0]))
 		actualOutputs[i] = float64(ArgMax(output))
 	}
 
-	// Use ADHD evaluation on micro network
-	microNet.Network.EvaluateModel(expectedOutputs, actualOutputs)
-	return microNet.Network.ComputeFinalScore()
+	// Use full ADHD evaluation like the main model
+	microNet.Network.EvaluateFull(expectedOutputs, actualOutputs)
+	return microNet.Network.Performance.Score
 }
 
 // trainMicroNetOnBatchADHD trains a micro network for exactly 1 epoch
@@ -529,7 +576,7 @@ func (n *Network[T]) tryAddingLayerToMicroNet(microNet *MicroNetwork[T], config 
 
 	newFullyConnected := []bool{false, true, true, true}
 
-	newNetwork := NewNetwork[T](newLayerSizes, newActivations, newFullyConnected)
+	newNetwork := NewNetworkRandomized[T](newLayerSizes, newActivations, newFullyConnected)
 	newNetwork.Debug = false
 
 	// Copy existing weights
