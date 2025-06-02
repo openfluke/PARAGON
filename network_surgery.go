@@ -41,10 +41,10 @@ func (n *Network[T]) ExtractMicroNetwork(checkpointLayer int) *MicroNetwork[T] {
 	microNet.Debug = false
 
 	// Copy weights: input → checkpoint (micro layer 0 → 1)
-	n.copyWeightsBetweenNetworks(n.InputLayer, checkpointLayer, microNet, 0, 1)
+	n.CopyWeightsBetweenNetworks(n.InputLayer, checkpointLayer, microNet, 0, 1)
 
 	// Copy weights: checkpoint → output (micro layer 1 → 2)
-	n.copyWeightsBetweenNetworks(checkpointLayer, n.OutputLayer, microNet, 1, 2)
+	n.CopyWeightsBetweenNetworks(checkpointLayer, n.OutputLayer, microNet, 1, 2)
 
 	return &MicroNetwork[T]{
 		Network:       microNet,
@@ -107,44 +107,6 @@ func (mn *MicroNetwork[T]) VerifyMicroNormalDiffers(input [][]float64, checkpoin
 	return isDifferent, normalOutput, checkpointOutput
 }
 
-// TryImprovement creates an improved version by adding a layer and tests performance
-func (mn *MicroNetwork[T]) TryImprovement(testInputs [][][]float64) (*MicroNetwork[T], bool) {
-	// Create improved network with additional hidden layer
-	currentLayers := mn.Network.Layers
-
-	improvedLayerSizes := []struct{ Width, Height int }{
-		{currentLayers[0].Width, currentLayers[0].Height}, // Input
-		{currentLayers[1].Width, currentLayers[1].Height}, // Original checkpoint layer
-		{4, 1}, // New hidden layer
-		{currentLayers[2].Width, currentLayers[2].Height}, // Output
-	}
-
-	improvedActivations := []string{"linear", "relu", "relu", "softmax"}
-	improvedFullyConnected := []bool{false, true, true, true}
-
-	improvedNet := NewNetwork[T](improvedLayerSizes, improvedActivations, improvedFullyConnected)
-	improvedNet.Debug = false
-
-	// Copy existing weights
-	mn.Network.copyWeightsBetweenNetworks(0, 1, improvedNet, 0, 1) // Input → checkpoint
-	mn.adaptOutputWeights(improvedNet)                             // Adapt checkpoint → output weights
-
-	improvedMicro := &MicroNetwork[T]{
-		Network:       improvedNet,
-		SourceLayers:  mn.SourceLayers,
-		CheckpointIdx: 1,
-	}
-
-	// Test performance
-	currentScore := mn.evaluatePerformance(testInputs)
-	improvedScore := improvedMicro.evaluatePerformance(testInputs)
-
-	if improvedScore > currentScore {
-		return improvedMicro, true
-	}
-	return mn, false
-}
-
 // ReattachToOriginal updates the original network with improvements from micro network
 func (mn *MicroNetwork[T]) ReattachToOriginal(originalNet *Network[T]) error {
 	checkpointLayer := mn.SourceLayers[1]
@@ -158,46 +120,20 @@ func (mn *MicroNetwork[T]) ReattachToOriginal(originalNet *Network[T]) error {
 			newLayer.Neurons[0][0].Activation, true)
 
 		// Copy weights
-		mn.Network.copyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, newLayerIdx)
-		mn.Network.copyWeightsBetweenNetworks(2, 3, originalNet, newLayerIdx, originalNet.OutputLayer)
+		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, newLayerIdx)
+		mn.Network.CopyWeightsBetweenNetworks(2, 3, originalNet, newLayerIdx, originalNet.OutputLayer)
 	} else {
 		// Update existing weights
-		mn.Network.copyWeightsBetweenNetworks(0, 1, originalNet, mn.SourceLayers[0], checkpointLayer)
-		mn.Network.copyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, originalNet.OutputLayer)
+		mn.Network.CopyWeightsBetweenNetworks(0, 1, originalNet, mn.SourceLayers[0], checkpointLayer)
+		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, originalNet.OutputLayer)
 	}
 
 	return nil
 }
 
-// NetworkSurgery performs complete micro network extraction, improvement, and reattachment
-func (n *Network[T]) NetworkSurgery(checkpointLayer int, testInputs [][][]float64,
-	tolerance float64) (*MicroNetwork[T], error) {
-
-	// Step 1: Extract micro network
-	microNet := n.ExtractMicroNetwork(checkpointLayer)
-
-	// Step 2: Verify equivalence
-	if len(testInputs) > 0 {
-		isEquivalent, _ := microNet.VerifyThreeWayEquivalence(n, testInputs[0], tolerance)
-		if !isEquivalent {
-			return nil, fmt.Errorf("micro network verification failed")
-		}
-	}
-
-	// Step 3: Try improvements
-	bestMicro, _ := microNet.TryImprovement(testInputs)
-
-	// Step 4: Reattach
-	if err := bestMicro.ReattachToOriginal(n); err != nil {
-		return nil, fmt.Errorf("reattachment failed: %v", err)
-	}
-
-	return bestMicro, nil
-}
-
 // Helper methods
 
-func (srcNet *Network[T]) copyWeightsBetweenNetworks(srcFromLayer, srcToLayer int,
+func (srcNet *Network[T]) CopyWeightsBetweenNetworks(srcFromLayer, srcToLayer int,
 	dstNet *Network[T], dstFromLayer, dstToLayer int) {
 
 	srcLayer := srcNet.Layers[srcToLayer]
@@ -273,4 +209,39 @@ func outputsMatch(output1, output2 []float64, tolerance float64) bool {
 		}
 	}
 	return true
+}
+
+// NetworkSurgery performs complete micro network extraction, improvement, and reattachment
+func (n *Network[T]) NetworkSurgery(
+	checkpointLayer int,
+	testInputs [][][]float64,
+	tolerance float64,
+	minWidth int,
+	maxWidth int,
+	activationPool []string,
+) (*MicroNetwork[T], error) {
+
+	// Step 1: Extract micro network
+	microNet := n.ExtractMicroNetwork(checkpointLayer)
+
+	// Step 2: Verify equivalence
+	if len(testInputs) > 0 {
+		isEquivalent, _ := microNet.VerifyThreeWayEquivalence(n, testInputs[0], tolerance)
+		if !isEquivalent {
+			return nil, fmt.Errorf("micro network verification failed")
+		}
+	}
+
+	// Step 3: Try improvements with parameters
+	bestMicro, improved := microNet.TryImprovement(testInputs, minWidth, maxWidth, activationPool)
+	if !improved {
+		fmt.Println("⚠️  No improvement found; reattaching original micro network")
+	}
+
+	// Step 4: Reattach
+	if err := bestMicro.ReattachToOriginal(n); err != nil {
+		return nil, fmt.Errorf("reattachment failed: %v", err)
+	}
+
+	return bestMicro, nil
 }
