@@ -3,7 +3,7 @@ package paragon
 import (
 	"fmt"
 
-	"github.com/openfluke/webgpu/wgpu"
+	"github.com/cogentcore/webgpu/wgpu"
 )
 
 // Complete batch shader generation function

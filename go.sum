@@ -1,2 +1,2 @@
-github.com/cogentcore/webgpu v0.23.0 h1:hrjnnuDZAPSRsqBjQAsJOyg2COGztIkBbxL87r0Q9KE=
-github.com/cogentcore/webgpu v0.23.0/go.mod h1:ciqaxChrmRRMU1SnI5OE12Cn3QWvOKO+e5nSy+N9S1o=
+github.com/openfluke/webgpu v0.0.0-20250602002809-2a3d4670a0d4 h1:ERg69QxWU6JYHBAlQ25m6PMPbcFtLQibMAz5lVvOCbg=
+github.com/openfluke/webgpu v0.0.0-20250602002809-2a3d4670a0d4/go.mod h1:072J6eEkBj9KgFzMY1RMgscUnu3EfTZsQABObSMZy1c=
