@@ -1,2 +1,2 @@
-github.com/rajveermalviya/go-webgpu/wgpu v0.17.1 h1:BlPsyVdDfTdDh50nZypBH5Qu+on03AJgiRs0Lt7TFaI=
-github.com/rajveermalviya/go-webgpu/wgpu v0.17.1/go.mod h1:fr08XXRX3QNhQW6ylg9ihJl3NXFU0oMuqOglGpSgSJo=
+github.com/cogentcore/webgpu v0.23.0 h1:hrjnnuDZAPSRsqBjQAsJOyg2COGztIkBbxL87r0Q9KE=
+github.com/cogentcore/webgpu v0.23.0/go.mod h1:ciqaxChrmRRMU1SnI5OE12Cn3QWvOKO+e5nSy+N9S1o=

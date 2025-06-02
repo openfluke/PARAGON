@@ -3,7 +3,7 @@ package paragon
 import (
 	"fmt"
 
-	"github.com/rajveermalviya/go-webgpu/wgpu"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 // Complete batch shader generation function
@@ -215,7 +215,7 @@ func (n *Network[float32]) forwardGPUBatch(inputs [][][]float64) ([][]float64, e
 
 	// Map and read results
 	done := make(chan wgpu.BufferMapAsyncStatus)
-	err = n.gpu.batchStgBuf.MapAsync(wgpu.MapMode_Read, 0, n.gpu.batchStgBuf.GetSize(),
+	err = n.gpu.batchStgBuf.MapAsync(wgpu.MapModeRead, 0, n.gpu.batchStgBuf.GetSize(),
 		func(status wgpu.BufferMapAsyncStatus) {
 			done <- status
 		})
@@ -228,7 +228,7 @@ func (n *Network[float32]) forwardGPUBatch(inputs [][][]float64) ([][]float64, e
 		ctx.device.Poll(true, nil)
 		select {
 		case status := <-done:
-			if status != wgpu.BufferMapAsyncStatus_Success {
+			if status != wgpu.BufferMapAsyncStatusSuccess {
 				return nil, fmt.Errorf("buffer mapping failed: %v", status)
 			}
 			goto readResults
@@ -287,7 +287,7 @@ func (n *Network[float32]) buildBatchGPUKernels(batchSize int) error {
 	// Constants buffer
 	n.gpu.batchConstBuf, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Size:  16, // Align to 16 bytes for uniform buffer
-		Usage: wgpu.BufferUsage_Uniform | wgpu.BufferUsage_CopyDst,
+		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create constants buffer: %v", err)
@@ -296,7 +296,7 @@ func (n *Network[float32]) buildBatchGPUKernels(batchSize int) error {
 	// Input buffer
 	n.gpu.batchInBuf, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Size:  uint64(batchSize * inputSize * 4),
-		Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create batch input buffer: %v", err)
@@ -308,7 +308,7 @@ func (n *Network[float32]) buildBatchGPUKernels(batchSize int) error {
 		size := n.Layers[l].Width * n.Layers[l].Height
 		n.gpu.batchOutBufs[l-1], err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 			Size:  uint64(batchSize * size * 4),
-			Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopySrc,
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create output buffer %d: %v", l-1, err)
@@ -319,7 +319,7 @@ func (n *Network[float32]) buildBatchGPUKernels(batchSize int) error {
 	outputSize := n.Layers[n.OutputLayer].Width * n.Layers[n.OutputLayer].Height
 	n.gpu.batchStgBuf, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Size:  uint64(batchSize * outputSize * 4),
-		Usage: wgpu.BufferUsage_MapRead | wgpu.BufferUsage_CopyDst,
+		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create staging buffer: %v", err)

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/rajveermalviya/go-webgpu/wgpu"
+	"github.com/openfluke/webgpu/wgpu"
 )
 
 // GPULayerCompute represents a single layer's GPU computation
@@ -97,33 +97,33 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 		Entries: []wgpu.BindGroupLayoutEntry{
 			{
 				Binding:    0,
-				Visibility: wgpu.ShaderStage_Compute,
+				Visibility: wgpu.ShaderStageCompute,
 				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingType_ReadOnlyStorage,
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
 				},
 			},
 			{
 				Binding:    1,
-				Visibility: wgpu.ShaderStage_Compute,
+				Visibility: wgpu.ShaderStageCompute,
 				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingType_Storage,
+					Type:             wgpu.BufferBindingTypeStorage,
 					HasDynamicOffset: false,
 				},
 			},
 			{
 				Binding:    2,
-				Visibility: wgpu.ShaderStage_Compute,
+				Visibility: wgpu.ShaderStageCompute,
 				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingType_ReadOnlyStorage,
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
 				},
 			},
 			{
 				Binding:    3,
-				Visibility: wgpu.ShaderStage_Compute,
+				Visibility: wgpu.ShaderStageCompute,
 				Buffer: wgpu.BufferBindingLayout{
-					Type:             wgpu.BufferBindingType_ReadOnlyStorage,
+					Type:             wgpu.BufferBindingTypeReadOnlyStorage,
 					HasDynamicOffset: false,
 				},
 			},
@@ -171,7 +171,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.inputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: fmt.Sprintf("Layer_%d_Input", layerIdx),
 		Size:  uint64(inputSize) * 4,
-		Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst | wgpu.BufferUsage_CopySrc,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -182,7 +182,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.outputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: fmt.Sprintf("Layer_%d_Output", layerIdx),
 		Size:  uint64(outputSize) * 4,
-		Usage: wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst | wgpu.BufferUsage_CopySrc,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -193,7 +193,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.stagingBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: fmt.Sprintf("Layer_%d_Staging", layerIdx),
 		Size:  uint64(outputSize) * 4,
-		Usage: wgpu.BufferUsage_MapRead | wgpu.BufferUsage_CopyDst,
+		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -207,7 +207,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.weightBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Weights", layerIdx),
 		Contents: wgpu.ToBytes(weights),
-		Usage:    wgpu.BufferUsage_Storage,
+		Usage:    wgpu.BufferUsageStorage,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -218,7 +218,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.biasBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Biases", layerIdx),
 		Contents: wgpu.ToBytes(biases),
-		Usage:    wgpu.BufferUsage_Storage,
+		Usage:    wgpu.BufferUsageStorage,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -556,7 +556,7 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]T, error) {
 	done := make(chan wgpu.BufferMapAsyncStatus, 1)
 
-	err := buffer.MapAsync(wgpu.MapMode_Read, 0, buffer.GetSize(),
+	err := buffer.MapAsync(wgpu.MapModeRead, 0, buffer.GetSize(),
 		func(status wgpu.BufferMapAsyncStatus) {
 			done <- status
 		})
@@ -569,7 +569,7 @@ func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]T, erro
 		ctx.device.Poll(true, nil)
 		select {
 		case status := <-done:
-			if status != wgpu.BufferMapAsyncStatus_Success {
+			if status != wgpu.BufferMapAsyncStatusSuccess {
 				return nil, fmt.Errorf("buffer mapping failed: %v", status)
 			}
 			goto readData
