@@ -51,17 +51,18 @@ type Connection[T Numeric] struct {
 
 // Network encapsulates the entire model
 type Network[T Numeric] struct {
-	Layers       []Grid[T]
-	InputLayer   int
-	OutputLayer  int
-	Debug        bool
-	TypeName     string
-	Performance  *ADHDPerformance
-	Composite    *CompositePerformance
-	ReplayStats  map[int][]int // layer index → replay counts per sample
-	WebGPUNative bool
-	SCALE        int64
-	gpu          struct {
+	GrowthHistory []GrowthLog `json:"growth_history,omitempty"`
+	Layers        []Grid[T]
+	InputLayer    int
+	OutputLayer   int
+	Debug         bool
+	TypeName      string
+	Performance   *ADHDPerformance
+	Composite     *CompositePerformance
+	ReplayStats   map[int][]int // layer index → replay counts per sample
+	WebGPUNative  bool
+	SCALE         int64
+	gpu           struct {
 		wgslType   string
 		wBufs      []*wgpu.Buffer
 		bBufs      []*wgpu.Buffer

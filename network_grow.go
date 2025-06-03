@@ -1,10 +1,22 @@
 package paragon
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 )
+
+type GrowthLog struct {
+	LayerIndex  int     `json:"layer_index"`
+	Width       int     `json:"width"`
+	Height      int     `json:"height"`
+	Activation  string  `json:"activation"`
+	ScoreBefore float64 `json:"score_before"`
+	ScoreAfter  float64 `json:"score_after"`
+	Timestamp   string  `json:"timestamp"`
+}
 
 func (n *Network[T]) Grow(
 	checkpointLayer int,
@@ -233,4 +245,25 @@ func (mn *MicroNetwork[T]) TryImprovement(
 		return improvedMicro, true
 	}
 	return mn, false
+}
+
+func (n *Network[T]) PrintGrowthHistory() {
+	if len(n.GrowthHistory) == 0 {
+		fmt.Println("📭 No growth history logged.")
+		return
+	}
+	fmt.Println("🌱 Growth History Log:")
+	for _, g := range n.GrowthHistory {
+		fmt.Printf("  ➕ Layer %d: %dx%d (%s), Score %.2f → %.2f [%s]\n",
+			g.LayerIndex, g.Width, g.Height, g.Activation,
+			g.ScoreBefore, g.ScoreAfter, g.Timestamp)
+	}
+}
+
+func (n *Network[T]) SaveGrowthLogJSON(path string) error {
+	data, err := json.MarshalIndent(n.GrowthHistory, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
