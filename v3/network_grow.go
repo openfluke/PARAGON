@@ -36,7 +36,9 @@ func (n *Network[T]) Grow(
 	activationPool []string,
 	maxThreads int,
 ) bool {
-	originalScore := n.Performance.Score
+	// FIXED: Calculate baseline score on THIS batch, not global score
+	baselineScore := n.calculateBatchScore(testInputs, expectedOutputs)
+	fmt.Printf("🎯 Baseline score on this batch: %.2f\n", baselineScore)
 
 	type result struct {
 		score float64
@@ -123,8 +125,11 @@ func (n *Network[T]) Grow(
 		}
 	}
 
-	// Apply if better
-	if bestMicro != nil && bestScore > originalScore {
+	fmt.Printf("🏆 Best micro score: %.2f vs baseline: %.2f\n", bestScore, baselineScore)
+
+	// FIXED: Compare against baseline score on this batch, with small improvement threshold
+	improvementThreshold := 1.0 // Require at least 1% improvement
+	if bestMicro != nil && bestScore > baselineScore+improvementThreshold {
 		newNet := &Network[T]{}
 		data, err := n.MarshalJSONModel()
 		if err != nil {
@@ -142,46 +147,80 @@ func (n *Network[T]) Grow(
 			return false
 		}
 
-		// Now evaluate the NEW FULL NETWORK on the original inputs (not checkpoints)
-		// Extract expected labels for evaluation
-		expectedLabels := make([]float64, len(testInputs))
-		actualLabels := make([]float64, len(testInputs))
+		// Now evaluate the NEW FULL NETWORK on this batch
+		newBatchScore := newNet.calculateBatchScore(testInputs, expectedOutputs)
+		fmt.Printf("🔍 New network score on batch: %.2f\n", newBatchScore)
 
-		for i, input := range testInputs {
-			newNet.Forward(input)
-			output := newNet.GetOutput()
-			actualLabels[i] = float64(ArgMax(output))
-			expectedLabels[i] = expectedOutputs[i]
-		}
-
-		newNet.EvaluateModel(expectedLabels, actualLabels)
-
-		if newNet.Performance.Score > originalScore {
-			// Append to growth history
-			if newNet.GrowthHistory == nil {
+		// FIXED: Compare new full network against baseline on same batch
+		if newBatchScore > baselineScore+improvementThreshold {
+			// Copy the existing growth history from the original network first
+			if n.GrowthHistory != nil {
+				newNet.GrowthHistory = make([]GrowthLog, len(n.GrowthHistory))
+				copy(newNet.GrowthHistory, n.GrowthHistory)
+			} else {
 				newNet.GrowthHistory = []GrowthLog{}
 			}
 
-			// The new layer is inserted after checkpoint, so index is checkpointLayer + 1
+			// Find the actual new layer that was added
 			newLayerIdx := checkpointLayer + 1
-			newNet.GrowthHistory = append(newNet.GrowthHistory, GrowthLog{
-				LayerIndex:  newLayerIdx,
-				Width:       newNet.Layers[newLayerIdx].Width,
-				Height:      newNet.Layers[newLayerIdx].Height,
-				Activation:  newNet.Layers[newLayerIdx].Neurons[0][0].Activation,
-				ScoreBefore: originalScore,
-				ScoreAfter:  newNet.Performance.Score,
-				Timestamp:   time.Now().Format(time.RFC3339),
-			})
+
+			// Ensure we're logging the correct layer index
+			if newLayerIdx < len(newNet.Layers) {
+				// Always append the new growth log
+				newNet.GrowthHistory = append(newNet.GrowthHistory, GrowthLog{
+					LayerIndex:  newLayerIdx,
+					Width:       newNet.Layers[newLayerIdx].Width,
+					Height:      newNet.Layers[newLayerIdx].Height,
+					Activation:  newNet.Layers[newLayerIdx].Neurons[0][0].Activation,
+					ScoreBefore: baselineScore,
+					ScoreAfter:  newBatchScore,
+					Timestamp:   time.Now().Format(time.RFC3339),
+				})
+
+				fmt.Printf("📝 Logged growth #%d: Layer %d (%dx%d, %s)\n",
+					len(newNet.GrowthHistory),
+					newLayerIdx,
+					newNet.Layers[newLayerIdx].Width,
+					newNet.Layers[newLayerIdx].Height,
+					newNet.Layers[newLayerIdx].Neurons[0][0].Activation)
+			}
 
 			*n = *newNet
-			fmt.Printf("✅ Network improved from %.2f → %.2f via Grow()\n", originalScore, newNet.Performance.Score)
+			fmt.Printf("✅ Network improved from %.2f → %.2f via Grow()\n", baselineScore, newBatchScore)
 			return true
+		} else {
+			fmt.Printf("⚠️ Full network score %.2f not better than baseline %.2f\n", newBatchScore, baselineScore)
 		}
+	} else {
+		fmt.Printf("⚠️ Best micro score %.2f not better than baseline %.2f + threshold %.2f\n",
+			bestScore, baselineScore, improvementThreshold)
 	}
 
 	fmt.Println("⚠️ Grow() found no candidate that outperformed the current network")
 	return false
+}
+
+// Helper function to calculate network score on a specific batch
+func (n *Network[T]) calculateBatchScore(inputs [][][]float64, expectedOutputs []float64) float64 {
+	expectedLabels := make([]float64, len(inputs))
+	actualLabels := make([]float64, len(inputs))
+
+	for i, input := range inputs {
+		n.Forward(input)
+		output := n.GetOutput()
+		actualLabels[i] = float64(ArgMax(output))
+		expectedLabels[i] = expectedOutputs[i]
+	}
+
+	// Calculate accuracy as percentage
+	correct := 0
+	for i := range expectedLabels {
+		if expectedLabels[i] == actualLabels[i] {
+			correct++
+		}
+	}
+
+	return float64(correct) / float64(len(expectedLabels)) * 100.0
 }
 
 func BuildTargetsFromLabels(labels []float64, numClasses int) [][][]float64 {
