@@ -218,6 +218,8 @@ func (n *Network[T]) NetworkSurgery(
 	tolerance float64,
 	minWidth int,
 	maxWidth int,
+	minHeight int,
+	maxHeight int,
 	activationPool []string,
 ) (*MicroNetwork[T], error) {
 
@@ -233,7 +235,7 @@ func (n *Network[T]) NetworkSurgery(
 	}
 
 	// Step 3: Try improvements with parameters
-	bestMicro, improved := microNet.TryImprovement(testInputs, minWidth, maxWidth, activationPool)
+	bestMicro, improved := microNet.TryImprovement(testInputs, minWidth, maxWidth, minHeight, maxHeight, activationPool)
 	if !improved {
 		fmt.Println("⚠️  No improvement found; reattaching original micro network")
 	}

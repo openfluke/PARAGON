@@ -18,9 +18,12 @@ func (n *Network[T]) Grow(
 	clipLower T,
 	minWidth int,
 	maxWidth int,
+	minHeight int,
+	maxHeight int,
 	activationPool []string,
 	maxThreads int,
 ) bool {
+
 	originalScore := n.Performance.Score
 	type result struct {
 		score float64
@@ -39,7 +42,8 @@ func (n *Network[T]) Grow(
 			for range jobs {
 				micro := n.ExtractMicroNetwork(checkpointLayer)
 
-				improved, success := micro.TryImprovement(testInputs, minWidth, maxWidth, activationPool)
+				improved, success := micro.TryImprovement(testInputs, minWidth, maxWidth, minHeight, maxHeight, activationPool)
+
 				if !success {
 					continue
 				}
@@ -130,43 +134,52 @@ func ExtractPredictedLabels[T Numeric](net *Network[T], inputs [][][]float64) []
 	return labels
 }
 
-func (mn *MicroNetwork[T]) TryImprovement(testInputs [][][]float64, minWidth int, maxWidth int, activationPool []string) (*MicroNetwork[T], bool) {
+func (mn *MicroNetwork[T]) TryImprovement(
+	testInputs [][][]float64,
+	minWidth int,
+	maxWidth int,
+	minHeight int,
+	maxHeight int,
+	activationPool []string,
+) (*MicroNetwork[T], bool) {
 	currentLayers := mn.Network.Layers
 
-	// Read original activations
+	// Extract existing activation functions
 	inputAct := currentLayers[0].Neurons[0][0].Activation
 	checkpointAct := currentLayers[1].Neurons[0][0].Activation
 	outputAct := currentLayers[len(currentLayers)-1].Neurons[0][0].Activation
 
-	// Dynamically insert a new hidden layer with random width and activation
+	// Randomize width, height, and activation for the new layer
 	newWidth := rand.Intn(maxWidth-minWidth+1) + minWidth
+	newHeight := rand.Intn(maxHeight-minHeight+1) + minHeight
 	activation := activationPool[rand.Intn(len(activationPool))]
 
+	// Define new architecture: input → checkpoint → new hidden → output
 	improvedLayerSizes := []struct{ Width, Height int }{
 		{currentLayers[0].Width, currentLayers[0].Height}, // Input
 		{currentLayers[1].Width, currentLayers[1].Height}, // Checkpoint
-		{newWidth, 1}, // New hidden
+		{newWidth, newHeight},                             // New hidden
 		{currentLayers[2].Width, currentLayers[2].Height}, // Output
 	}
 	improvedActivations := []string{inputAct, checkpointAct, activation, outputAct}
 	improvedFullyConnected := []bool{false, true, true, true}
 
-	// Build improved net
+	// Create improved network
 	improvedNet := NewNetwork[T](improvedLayerSizes, improvedActivations, improvedFullyConnected)
 	improvedNet.Debug = false
 
-	// Copy weights
+	// Copy weights from original micro to improved
 	mn.Network.CopyWeightsBetweenNetworks(0, 1, improvedNet, 0, 1) // Input → Checkpoint
-	mn.adaptOutputWeights(improvedNet)                             // Checkpoint → Output (via new hidden)
+	mn.adaptOutputWeights(improvedNet)                             // Checkpoint → Output via new hidden
 
-	// Package micro network
+	// Package new micro network
 	improvedMicro := &MicroNetwork[T]{
 		Network:       improvedNet,
 		SourceLayers:  mn.SourceLayers,
-		CheckpointIdx: 1,
+		CheckpointIdx: 1, // still layer 1 in micro
 	}
 
-	// Evaluate improvement
+	// Compare performance
 	currentScore := mn.evaluatePerformance(testInputs)
 	improvedScore := improvedMicro.evaluatePerformance(testInputs)
 
