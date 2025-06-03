@@ -3,6 +3,7 @@ package paragon
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 )
 
 func (n *Network[T]) Grow(
@@ -18,38 +19,67 @@ func (n *Network[T]) Grow(
 	minWidth int,
 	maxWidth int,
 	activationPool []string,
+	maxThreads int,
 ) bool {
 	originalScore := n.Performance.Score
+	type result struct {
+		score float64
+		micro *MicroNetwork[T]
+	}
+	results := make(chan result, numCandidates)
+
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+
+	// Start workers
+	for t := 0; t < maxThreads; t++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range jobs {
+				micro := n.ExtractMicroNetwork(checkpointLayer)
+
+				improved, success := micro.TryImprovement(testInputs, minWidth, maxWidth, activationPool)
+				if !success {
+					continue
+				}
+
+				targets := BuildTargetsFromLabels(expectedOutputs, n.Layers[n.OutputLayer].Width)
+				improved.Network.Train(testInputs, targets, epochs, learningRate, false, clipUpper, clipLower)
+
+				outputs := ExtractPredictedLabels(improved.Network, testInputs)
+				improved.Network.EvaluateModel(expectedOutputs, outputs)
+
+				results <- result{
+					score: improved.Network.Performance.Score,
+					micro: improved,
+				}
+			}
+		}()
+	}
+
+	// Feed jobs
+	go func() {
+		for i := 0; i < numCandidates; i++ {
+			jobs <- i
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	// After all done, pick best
 	var bestScore float64 = -1
 	var bestMicro *MicroNetwork[T]
-
-	for i := 0; i < numCandidates; i++ {
-		// 1. Extract micro-network
-		micro := n.ExtractMicroNetwork(checkpointLayer)
-
-		// 2. Try improvement by adding a new layer
-		improved, success := micro.TryImprovement(testInputs, minWidth, maxWidth, activationPool)
-		if !success {
-			continue
-		}
-
-		// 3. Train improved micro-network
-		targets := BuildTargetsFromLabels(expectedOutputs, n.Layers[n.OutputLayer].Width)
-		improved.Network.Train(testInputs, targets, epochs, learningRate, false, clipUpper, clipLower)
-
-		// 4. Evaluate ADHD score
-		outputs := ExtractPredictedLabels(improved.Network, testInputs)
-		improved.Network.EvaluateModel(expectedOutputs, outputs)
-		score := improved.Network.Performance.Score
-
-		if score > bestScore {
-			bestScore = score
-			bestMicro = improved
+	for r := range results {
+		if r.score > bestScore {
+			bestScore = r.score
+			bestMicro = r.micro
 		}
 	}
 
+	// Apply result if better
 	if bestMicro != nil && bestScore > originalScore {
-		// Deep copy original network
 		newNet := &Network[T]{}
 		data, err := n.MarshalJSONModel()
 		if err != nil {
@@ -60,17 +90,14 @@ func (n *Network[T]) Grow(
 			fmt.Println("Failed to unmarshal into network copy:", err)
 			return false
 		}
-
-		// Reattach the improved micro-network
 		if err := bestMicro.ReattachToOriginal(newNet); err != nil {
 			fmt.Println("Failed to reattach micro-network:", err)
 			return false
 		}
 
-		// Re-evaluate and accept if better
 		newNet.EvaluateModel(expectedOutputs, ExtractPredictedLabels(newNet, testInputs))
 		if newNet.Performance.Score > originalScore {
-			*n = *newNet // Apply improvement
+			*n = *newNet
 			fmt.Printf("✅ Network improved from %.2f → %.2f via Grow()\n", originalScore, newNet.Performance.Score)
 			return true
 		}
