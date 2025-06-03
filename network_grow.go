@@ -39,10 +39,35 @@ func (n *Network[T]) Grow(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range jobs {
-				micro := n.ExtractMicroNetwork(checkpointLayer)
 
-				improved, success := micro.TryImprovement(testInputs, minWidth, maxWidth, minHeight, maxHeight, activationPool)
+			// Recover from panic to prevent full crash
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("🔥 Recovered from panic in Grow() thread: %v\n", r)
+				}
+			}()
+
+			// Clone the original network once per worker
+			workerNet := &Network[T]{}
+			data, err := n.MarshalJSONModel()
+			if err != nil {
+				fmt.Println("❌ Failed to marshal original network for cloning:", err)
+				return
+			}
+			if err := workerNet.UnmarshalJSONModel(data); err != nil {
+				fmt.Println("❌ Failed to unmarshal cloned network:", err)
+				return
+			}
+
+			for range jobs {
+				micro := workerNet.ExtractMicroNetwork(checkpointLayer)
+
+				improved, success := micro.TryImprovement(
+					testInputs,
+					minWidth, maxWidth,
+					minHeight, maxHeight,
+					activationPool,
+				)
 
 				if !success {
 					continue
@@ -72,7 +97,7 @@ func (n *Network[T]) Grow(
 		close(results)
 	}()
 
-	// After all done, pick best
+	// Select best candidate
 	var bestScore float64 = -1
 	var bestMicro *MicroNetwork[T]
 	for r := range results {
@@ -126,11 +151,32 @@ func BuildTargetsFromLabels(labels []float64, numClasses int) [][][]float64 {
 
 func ExtractPredictedLabels[T Numeric](net *Network[T], inputs [][][]float64) []float64 {
 	labels := make([]float64, len(inputs))
+	inW := net.Layers[0].Width
+	inH := net.Layers[0].Height
+
 	for i, in := range inputs {
-		net.Forward(in)
-		raw := net.GetOutput()
-		labels[i] = float64(ArgMax(raw))
+		if len(in) != inH || len(in[0]) != inW {
+			fmt.Printf("⚠️  Skipping input %d due to mismatched input shape: got %dx%d, want %dx%d\n",
+				i, len(in[0]), len(in), inW, inH)
+			labels[i] = -1
+			continue
+		}
+
+		// Recover from per-input panic
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("🔥 Recovered from panic in input %d Forward(): %v\n", i, r)
+					labels[i] = -1
+				}
+			}()
+
+			net.Forward(in)
+			raw := net.GetOutput()
+			labels[i] = float64(ArgMax(raw))
+		}()
 	}
+
 	return labels
 }
 
