@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"time"
 )
 
 type GrowthLog struct {
@@ -35,8 +36,8 @@ func (n *Network[T]) Grow(
 	activationPool []string,
 	maxThreads int,
 ) bool {
-
 	originalScore := n.Performance.Score
+
 	type result struct {
 		score float64
 		micro *MicroNetwork[T]
@@ -51,15 +52,12 @@ func (n *Network[T]) Grow(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-
-			// Recover from panic to prevent full crash
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Printf("🔥 Recovered from panic in Grow() thread: %v\n", r)
 				}
 			}()
 
-			// Clone the original network once per worker
 			workerNet := &Network[T]{}
 			data, err := n.MarshalJSONModel()
 			if err != nil {
@@ -80,7 +78,6 @@ func (n *Network[T]) Grow(
 					minHeight, maxHeight,
 					activationPool,
 				)
-
 				if !success {
 					continue
 				}
@@ -119,7 +116,7 @@ func (n *Network[T]) Grow(
 		}
 	}
 
-	// Apply result if better
+	// Apply if better
 	if bestMicro != nil && bestScore > originalScore {
 		newNet := &Network[T]{}
 		data, err := n.MarshalJSONModel()
@@ -137,7 +134,22 @@ func (n *Network[T]) Grow(
 		}
 
 		newNet.EvaluateModel(expectedOutputs, ExtractPredictedLabels(newNet, testInputs))
+
 		if newNet.Performance.Score > originalScore {
+			// Append to growth history
+			if newNet.GrowthHistory == nil {
+				newNet.GrowthHistory = []GrowthLog{}
+			}
+			newNet.GrowthHistory = append(newNet.GrowthHistory, GrowthLog{
+				LayerIndex:  bestMicro.SourceLayers[1] + 1,
+				Width:       newNet.Layers[bestMicro.SourceLayers[1]+1].Width,
+				Height:      newNet.Layers[bestMicro.SourceLayers[1]+1].Height,
+				Activation:  newNet.Layers[bestMicro.SourceLayers[1]+1].Neurons[0][0].Activation,
+				ScoreBefore: originalScore,
+				ScoreAfter:  newNet.Performance.Score,
+				Timestamp:   time.Now().Format(time.RFC3339),
+			})
+
 			*n = *newNet
 			fmt.Printf("✅ Network improved from %.2f → %.2f via Grow()\n", originalScore, newNet.Performance.Score)
 			return true

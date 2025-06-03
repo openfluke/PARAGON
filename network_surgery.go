@@ -2,7 +2,6 @@ package paragon
 
 import (
 	"fmt"
-	"time"
 )
 
 // MicroNetwork represents a sub-network extracted from a larger network
@@ -123,20 +122,6 @@ func (mn *MicroNetwork[T]) ReattachToOriginal(originalNet *Network[T]) error {
 		// Copy weights
 		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, newLayerIdx)
 		mn.Network.CopyWeightsBetweenNetworks(2, 3, originalNet, newLayerIdx, originalNet.OutputLayer)
-
-		// Log the growth event
-		if originalNet.GrowthHistory == nil {
-			originalNet.GrowthHistory = []GrowthLog{}
-		}
-		originalNet.GrowthHistory = append(originalNet.GrowthHistory, GrowthLog{
-			LayerIndex:  newLayerIdx,
-			Width:       newLayer.Width,
-			Height:      newLayer.Height,
-			Activation:  newLayer.Neurons[0][0].Activation,
-			ScoreBefore: originalNet.Performance.Score,
-			ScoreAfter:  mn.Network.Performance.Score, // Assuming this is set during Grow()
-			Timestamp:   time.Now().Format(time.RFC3339),
-		})
 	} else {
 		// Update existing weights
 		mn.Network.CopyWeightsBetweenNetworks(0, 1, originalNet, mn.SourceLayers[0], checkpointLayer)
