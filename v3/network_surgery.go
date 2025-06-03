@@ -18,38 +18,32 @@ func (n *Network[T]) ExtractMicroNetwork(checkpointLayer int) *MicroNetwork[T] {
 			checkpointLayer, n.InputLayer+1, n.OutputLayer-1))
 	}
 
-	inputSize := n.Layers[n.InputLayer]
 	checkpointSize := n.Layers[checkpointLayer]
 	outputSize := n.Layers[n.OutputLayer]
 
-	// Create micro network structure: input → checkpoint → output
+	// Create micro network: checkpoint → output (2 layers, replicating main network behavior)
 	microLayerSizes := []struct{ Width, Height int }{
-		{inputSize.Width, inputSize.Height},
-		{checkpointSize.Width, checkpointSize.Height},
-		{outputSize.Width, outputSize.Height},
+		{checkpointSize.Width, checkpointSize.Height}, // Layer 0: checkpoint input
+		{outputSize.Width, outputSize.Height},         // Layer 1: output
 	}
 
 	microActivations := []string{
-		n.Layers[n.InputLayer].Neurons[0][0].Activation,
-		n.Layers[checkpointLayer].Neurons[0][0].Activation,
-		n.Layers[n.OutputLayer].Neurons[0][0].Activation,
+		n.Layers[checkpointLayer].Neurons[0][0].Activation, // checkpoint activation
+		n.Layers[n.OutputLayer].Neurons[0][0].Activation,   // output activation
 	}
 
-	microFullyConnected := []bool{false, true, true}
+	microFullyConnected := []bool{true, true}
 
 	microNet := NewNetwork[T](microLayerSizes, microActivations, microFullyConnected)
 	microNet.Debug = false
 
-	// Copy weights: input → checkpoint (micro layer 0 → 1)
-	n.CopyWeightsBetweenNetworks(n.InputLayer, checkpointLayer, microNet, 0, 1)
-
-	// Copy weights: checkpoint → output (micro layer 1 → 2)
-	n.CopyWeightsBetweenNetworks(checkpointLayer, n.OutputLayer, microNet, 1, 2)
+	// Copy weights from original network: checkpoint → output becomes layer 0 → 1
+	n.CopyWeightsBetweenNetworks(checkpointLayer, n.OutputLayer, microNet, 0, 1)
 
 	return &MicroNetwork[T]{
 		Network:       microNet,
-		SourceLayers:  []int{n.InputLayer, checkpointLayer, n.OutputLayer},
-		CheckpointIdx: 1, // Layer 1 in micro network corresponds to checkpoint layer
+		SourceLayers:  []int{checkpointLayer, n.OutputLayer},
+		CheckpointIdx: 0, // Feed checkpoint data at layer 0
 	}
 }
 
@@ -109,23 +103,32 @@ func (mn *MicroNetwork[T]) VerifyMicroNormalDiffers(input [][]float64, checkpoin
 
 // ReattachToOriginal updates the original network with improvements from micro network
 func (mn *MicroNetwork[T]) ReattachToOriginal(originalNet *Network[T]) error {
-	checkpointLayer := mn.SourceLayers[1]
+	checkpointLayer := mn.SourceLayers[0] // The checkpoint layer index
 
-	if len(mn.Network.Layers) > 3 {
-		// Need to add new layer to original network
+	// Check if micro network has improvement (3 layers vs original 2)
+	if len(mn.Network.Layers) == 3 {
+		// Insert new layer after checkpoint
 		newLayerIdx := checkpointLayer + 1
-		newLayer := mn.Network.Layers[2] // The added hidden layer
+		microHiddenLayer := mn.Network.Layers[1] // The new hidden layer
 
-		originalNet.AddLayer(newLayerIdx, newLayer.Width, newLayer.Height,
-			newLayer.Neurons[0][0].Activation, true)
+		// Add the new layer to the original network
+		originalNet.AddLayer(newLayerIdx,
+			microHiddenLayer.Width,
+			microHiddenLayer.Height,
+			microHiddenLayer.Neurons[0][0].Activation,
+			true)
 
-		// Copy weights
-		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, newLayerIdx)
-		mn.Network.CopyWeightsBetweenNetworks(2, 3, originalNet, newLayerIdx, originalNet.OutputLayer)
+		// Copy weights: checkpoint→hidden (micro 0→1 becomes original checkpoint→newLayer)
+		mn.Network.CopyWeightsBetweenNetworks(0, 1, originalNet, checkpointLayer, newLayerIdx)
+
+		// Copy weights: hidden→output (micro 1→2 becomes original newLayer→output)
+		originalOutputIdx := originalNet.OutputLayer // Output index has shifted
+		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, newLayerIdx, originalOutputIdx)
+
 	} else {
-		// Update existing weights
-		mn.Network.CopyWeightsBetweenNetworks(0, 1, originalNet, mn.SourceLayers[0], checkpointLayer)
-		mn.Network.CopyWeightsBetweenNetworks(1, 2, originalNet, checkpointLayer, originalNet.OutputLayer)
+		// No improvement, just copy updated weights
+		originalOutputIdx := originalNet.OutputLayer
+		mn.Network.CopyWeightsBetweenNetworks(0, 1, originalNet, checkpointLayer, originalOutputIdx)
 	}
 
 	return nil
@@ -180,10 +183,20 @@ func (mn *MicroNetwork[T]) adaptOutputWeights(improvedNet *Network[T]) {
 	}
 }
 
-func (mn *MicroNetwork[T]) evaluatePerformance(testInputs [][][]float64) float64 {
+func (mn *MicroNetwork[T]) evaluatePerformance(checkpointActivations [][][]float64) float64 {
 	totalScore := 0.0
-	for _, input := range testInputs {
-		mn.Network.Forward(input)
+	validCount := 0
+
+	expectedW := mn.Network.Layers[0].Width
+	expectedH := mn.Network.Layers[0].Height
+
+	for _, activation := range checkpointActivations {
+		// Skip if activation doesn't match expected input size
+		if len(activation) != expectedH || len(activation[0]) != expectedW {
+			continue
+		}
+
+		mn.Network.Forward(activation)
 		output := mn.Network.GetOutput()
 
 		// Score based on maximum confidence
@@ -194,8 +207,13 @@ func (mn *MicroNetwork[T]) evaluatePerformance(testInputs [][][]float64) float64
 			}
 		}
 		totalScore += maxOutput
+		validCount++
 	}
-	return totalScore / float64(len(testInputs))
+
+	if validCount == 0 {
+		return 0.0
+	}
+	return totalScore / float64(validCount)
 }
 
 // Utility functions

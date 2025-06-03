@@ -47,6 +47,9 @@ func (n *Network[T]) Grow(
 	var wg sync.WaitGroup
 	jobs := make(chan int)
 
+	// Extract checkpoint activations from the original inputs
+	checkpointActivations := ExtractActivationsAtLayer(n, checkpointLayer, testInputs)
+
 	// Start workers
 	for t := 0; t < maxThreads; t++ {
 		wg.Add(1)
@@ -70,10 +73,12 @@ func (n *Network[T]) Grow(
 			}
 
 			for range jobs {
+				// Extract micro network from checkpoint to output
 				micro := workerNet.ExtractMicroNetwork(checkpointLayer)
 
+				// Try to improve the micro network by adding/modifying hidden layer
 				improved, success := micro.TryImprovement(
-					testInputs,
+					checkpointActivations, // Pass checkpoint activations, not original inputs
 					minWidth, maxWidth,
 					minHeight, maxHeight,
 					activationPool,
@@ -82,10 +87,12 @@ func (n *Network[T]) Grow(
 					continue
 				}
 
+				// Train the improved micro network on checkpoint activations
 				targets := BuildTargetsFromLabels(expectedOutputs, n.Layers[n.OutputLayer].Width)
-				improved.Network.Train(testInputs, targets, epochs, learningRate, false, clipUpper, clipLower)
+				improved.Network.Train(checkpointActivations, targets, epochs, learningRate, false, clipUpper, clipLower)
 
-				outputs := ExtractPredictedLabels(improved.Network, testInputs)
+				// Evaluate the micro network using checkpoint activations
+				outputs := ExtractPredictedLabels(improved.Network, checkpointActivations)
 				improved.Network.EvaluateModel(expectedOutputs, outputs)
 
 				results <- result{
@@ -128,23 +135,40 @@ func (n *Network[T]) Grow(
 			fmt.Println("Failed to unmarshal into network copy:", err)
 			return false
 		}
+
+		// Reattach the improved micro network to create the new full network
 		if err := bestMicro.ReattachToOriginal(newNet); err != nil {
 			fmt.Println("Failed to reattach micro-network:", err)
 			return false
 		}
 
-		newNet.EvaluateModel(expectedOutputs, ExtractPredictedLabels(newNet, testInputs))
+		// Now evaluate the NEW FULL NETWORK on the original inputs (not checkpoints)
+		// Extract expected labels for evaluation
+		expectedLabels := make([]float64, len(testInputs))
+		actualLabels := make([]float64, len(testInputs))
+
+		for i, input := range testInputs {
+			newNet.Forward(input)
+			output := newNet.GetOutput()
+			actualLabels[i] = float64(ArgMax(output))
+			expectedLabels[i] = expectedOutputs[i]
+		}
+
+		newNet.EvaluateModel(expectedLabels, actualLabels)
 
 		if newNet.Performance.Score > originalScore {
 			// Append to growth history
 			if newNet.GrowthHistory == nil {
 				newNet.GrowthHistory = []GrowthLog{}
 			}
+
+			// The new layer is inserted after checkpoint, so index is checkpointLayer + 1
+			newLayerIdx := checkpointLayer + 1
 			newNet.GrowthHistory = append(newNet.GrowthHistory, GrowthLog{
-				LayerIndex:  bestMicro.SourceLayers[1] + 1,
-				Width:       newNet.Layers[bestMicro.SourceLayers[1]+1].Width,
-				Height:      newNet.Layers[bestMicro.SourceLayers[1]+1].Height,
-				Activation:  newNet.Layers[bestMicro.SourceLayers[1]+1].Neurons[0][0].Activation,
+				LayerIndex:  newLayerIdx,
+				Width:       newNet.Layers[newLayerIdx].Width,
+				Height:      newNet.Layers[newLayerIdx].Height,
+				Activation:  newNet.Layers[newLayerIdx].Neurons[0][0].Activation,
 				ScoreBefore: originalScore,
 				ScoreAfter:  newNet.Performance.Score,
 				Timestamp:   time.Now().Format(time.RFC3339),
@@ -173,15 +197,17 @@ func BuildTargetsFromLabels(labels []float64, numClasses int) [][][]float64 {
 	return targets
 }
 
-func ExtractPredictedLabels[T Numeric](net *Network[T], inputs [][][]float64) []float64 {
-	labels := make([]float64, len(inputs))
-	inW := net.Layers[0].Width
-	inH := net.Layers[0].Height
+func ExtractPredictedLabels[T Numeric](net *Network[T], checkpointActivations [][][]float64) []float64 {
+	labels := make([]float64, len(checkpointActivations))
 
-	for i, in := range inputs {
-		if len(in) != inH || len(in[0]) != inW {
-			fmt.Printf("⚠️  Skipping input %d due to mismatched input shape: got %dx%d, want %dx%d\n",
-				i, len(in[0]), len(in), inW, inH)
+	// The micro network expects checkpoint activations as input
+	expectedW := net.Layers[0].Width
+	expectedH := net.Layers[0].Height
+
+	for i, activation := range checkpointActivations {
+		if len(activation) != expectedH || len(activation[0]) != expectedW {
+			fmt.Printf("⚠️  Skipping input %d due to mismatched activation shape: got %dx%d, want %dx%d\n",
+				i, len(activation[0]), len(activation), expectedW, expectedH)
 			labels[i] = -1
 			continue
 		}
@@ -195,7 +221,7 @@ func ExtractPredictedLabels[T Numeric](net *Network[T], inputs [][][]float64) []
 				}
 			}()
 
-			net.Forward(in)
+			net.Forward(activation) // Feed checkpoint activation directly
 			raw := net.GetOutput()
 			labels[i] = float64(ArgMax(raw))
 		}()
@@ -205,7 +231,7 @@ func ExtractPredictedLabels[T Numeric](net *Network[T], inputs [][][]float64) []
 }
 
 func (mn *MicroNetwork[T]) TryImprovement(
-	testInputs [][][]float64,
+	checkpointActivations [][][]float64,
 	minWidth int,
 	maxWidth int,
 	minHeight int,
@@ -214,44 +240,44 @@ func (mn *MicroNetwork[T]) TryImprovement(
 ) (*MicroNetwork[T], bool) {
 	currentLayers := mn.Network.Layers
 
-	// Extract existing activation functions
-	inputAct := currentLayers[0].Neurons[0][0].Activation
-	checkpointAct := currentLayers[1].Neurons[0][0].Activation
-	outputAct := currentLayers[len(currentLayers)-1].Neurons[0][0].Activation
+	// Validate micro-network has exactly 2 layers: checkpoint → output
+	if len(currentLayers) != 2 {
+		fmt.Printf("❌ TryImprovement: expected 2 layers (checkpoint → output), got %d\n", len(currentLayers))
+		return mn, false
+	}
 
-	// Randomize width, height, and activation for the new layer
+	checkpointAct := currentLayers[0].Neurons[0][0].Activation
+	outputAct := currentLayers[1].Neurons[0][0].Activation
+
+	// Generate new hidden layer dimensions
 	newWidth := rand.Intn(maxWidth-minWidth+1) + minWidth
 	newHeight := rand.Intn(maxHeight-minHeight+1) + minHeight
-	activation := activationPool[rand.Intn(len(activationPool))]
+	newAct := activationPool[rand.Intn(len(activationPool))]
 
-	// Define new architecture: input → checkpoint → new hidden → output
+	// Create improved network: checkpoint → new hidden → output (3 layers)
 	improvedLayerSizes := []struct{ Width, Height int }{
-		{currentLayers[0].Width, currentLayers[0].Height}, // Input
-		{currentLayers[1].Width, currentLayers[1].Height}, // Checkpoint
-		{newWidth, newHeight},                             // New hidden
-		{currentLayers[2].Width, currentLayers[2].Height}, // Output
+		{currentLayers[0].Width, currentLayers[0].Height}, // checkpoint input (unchanged)
+		{newWidth, newHeight},                             // NEW hidden layer
+		{currentLayers[1].Width, currentLayers[1].Height}, // output (unchanged)
 	}
-	improvedActivations := []string{inputAct, checkpointAct, activation, outputAct}
-	improvedFullyConnected := []bool{false, true, true, true}
+	improvedActivations := []string{checkpointAct, newAct, outputAct}
+	improvedFullyConnected := []bool{true, true, true}
 
-	// Create improved network
 	improvedNet := NewNetwork[T](improvedLayerSizes, improvedActivations, improvedFullyConnected)
 	improvedNet.Debug = false
 
-	// Copy weights from original micro to improved
-	mn.Network.CopyWeightsBetweenNetworks(0, 1, improvedNet, 0, 1) // Input → Checkpoint
-	mn.adaptOutputWeights(improvedNet)                             // Checkpoint → Output via new hidden
+	// Copy output weights from original micro (0→1) to improved (1→2)
+	mn.adaptOutputWeightsForNewLayer(improvedNet)
 
-	// Package new micro network
 	improvedMicro := &MicroNetwork[T]{
 		Network:       improvedNet,
 		SourceLayers:  mn.SourceLayers,
-		CheckpointIdx: 1, // still layer 1 in micro
+		CheckpointIdx: 0,
 	}
 
-	// Compare performance
-	currentScore := mn.evaluatePerformance(testInputs)
-	improvedScore := improvedMicro.evaluatePerformance(testInputs)
+	// Evaluate both networks on checkpoint activations
+	currentScore := mn.evaluatePerformance(checkpointActivations)
+	improvedScore := improvedMicro.evaluatePerformance(checkpointActivations)
 
 	if improvedScore > currentScore {
 		return improvedMicro, true
@@ -278,4 +304,85 @@ func (n *Network[T]) SaveGrowthLogJSON(path string) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+func ExtractActivationsAtLayer[T Numeric](net *Network[T], layerIndex int, inputs [][][]float64) [][][]float64 {
+	outputs := make([][][]float64, len(inputs))
+
+	for i, input := range inputs {
+		net.Forward(input)
+
+		layer := net.Layers[layerIndex]
+		activation := make([][]float64, layer.Height)
+		for y := 0; y < layer.Height; y++ {
+			activation[y] = make([]float64, layer.Width)
+			for x := 0; x < layer.Width; x++ {
+				activation[y][x] = float64(layer.Neurons[y][x].Value)
+			}
+		}
+		outputs[i] = activation
+	}
+	return outputs
+}
+
+func (mn *MicroNetwork[T]) adaptOutputWeightsForInsertedLayer(improvedNet *Network[T]) {
+	// From original: checkpoint → output = 0→1
+	// To improved: new hidden → output = 1→2
+	origOutput := mn.Network.Layers[1]
+	newOutput := &improvedNet.Layers[2]
+
+	for y := 0; y < min(origOutput.Height, newOutput.Height); y++ {
+		for x := 0; x < min(origOutput.Width, newOutput.Width); x++ {
+			src := origOutput.Neurons[y][x]
+			dst := newOutput.Neurons[y][x]
+
+			dst.Bias = src.Bias
+			maxW := min(len(src.Inputs), len(dst.Inputs))
+			for i := 0; i < maxW; i++ {
+				dst.Inputs[i].Weight = src.Inputs[i].Weight
+			}
+		}
+	}
+}
+
+func (mn *MicroNetwork[T]) adaptOutputWeightsForNewHidden(improvedNet *Network[T]) {
+	// Copy from original micro layer 2 (output) to improved layer 2 (output)
+	origOutput := mn.Network.Layers[2]
+	newOutput := &improvedNet.Layers[2]
+
+	for y := 0; y < min(origOutput.Height, newOutput.Height); y++ {
+		for x := 0; x < min(origOutput.Width, newOutput.Width); x++ {
+			src := origOutput.Neurons[y][x]
+			dst := newOutput.Neurons[y][x]
+
+			dst.Bias = src.Bias
+
+			// Copy as many weights as possible from the original connections
+			maxW := min(len(src.Inputs), len(dst.Inputs))
+			for i := 0; i < maxW; i++ {
+				dst.Inputs[i].Weight = src.Inputs[i].Weight
+			}
+		}
+	}
+}
+
+func (mn *MicroNetwork[T]) adaptOutputWeightsForNewLayer(improvedNet *Network[T]) {
+	// Copy from original micro layer 1 (output) to improved layer 2 (output)
+	origOutput := mn.Network.Layers[1]  // Original output layer
+	newOutput := &improvedNet.Layers[2] // New output layer (shifted due to insertion)
+
+	for y := 0; y < min(origOutput.Height, newOutput.Height); y++ {
+		for x := 0; x < min(origOutput.Width, newOutput.Width); x++ {
+			src := origOutput.Neurons[y][x]
+			dst := newOutput.Neurons[y][x]
+
+			dst.Bias = src.Bias
+
+			// Copy weights (the new hidden layer will have random weights initially)
+			maxW := min(len(src.Inputs), len(dst.Inputs))
+			for i := 0; i < maxW; i++ {
+				dst.Inputs[i].Weight = src.Inputs[i].Weight
+			}
+		}
+	}
 }
