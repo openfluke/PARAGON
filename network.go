@@ -97,12 +97,13 @@ func NewNetwork[T Numeric](
 	}
 
 	n := &Network[T]{
-		TypeName:    reflect.TypeOf(*new(T)).Name(),
-		Layers:      make([]Grid[T], len(layerSizes)),
-		InputLayer:  0,
-		OutputLayer: len(layerSizes) - 1,
-		Performance: NewADHDPerformance(),
-		ReplayStats: make(map[int][]int),
+		TypeName:      reflect.TypeOf(*new(T)).Name(),
+		Layers:        make([]Grid[T], len(layerSizes)),
+		InputLayer:    0,
+		OutputLayer:   len(layerSizes) - 1,
+		Performance:   NewADHDPerformance(),
+		ReplayStats:   make(map[int][]int),
+		GrowthHistory: []GrowthLog{}, // ✅ Ensure safe append
 	}
 
 	// Set the WGSL type in the gpu struct based on T
