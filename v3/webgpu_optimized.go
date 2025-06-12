@@ -1,9 +1,9 @@
-// webgpu_optimized.go
+// webgpu_optimized.go - Fixed version
 package paragon
 
 import (
 	"fmt"
-	"reflect"
+	"time"
 
 	"github.com/openfluke/webgpu/wgpu"
 )
@@ -23,6 +23,23 @@ type GPULayerCompute struct {
 	inputSize       uint32
 	outputSize      uint32
 	layerIndex      int
+
+	// Training additions
+	backwardPipeline   *wgpu.ComputePipeline
+	backwardBindGroup  *wgpu.BindGroup
+	backwardLayout     *wgpu.BindGroupLayout
+	errorInputBuffer   *wgpu.Buffer
+	errorOutputBuffer  *wgpu.Buffer
+	weightGradBuffer   *wgpu.Buffer
+	biasGradBuffer     *wgpu.Buffer
+	paramsBuffer       *wgpu.Buffer
+	errorStagingBuffer *wgpu.Buffer
+	gradStagingBuffer  *wgpu.Buffer
+}
+
+// GPUTrainingCompute extends GPULayerCompute for backward pass
+type GPUTrainingCompute struct {
+	*GPULayerCompute
 }
 
 // GPUCompute manages optimized GPU neural network computation
@@ -32,22 +49,51 @@ type GPUCompute struct {
 	layers      []*GPULayerCompute
 	initialized bool
 	debug       bool
+
+	// Training extensions
+	trainingLayers  []*GPUTrainingCompute
+	trainingEnabled bool
+}
+
+// GPUComputeEnhanced is an alias for GPUCompute for compatibility
+type GPUComputeEnhanced = GPUCompute
+
+// TrainingParameters for GPU training
+type TrainingParams struct {
+	LearningRate float32
+	ClipUpper    float32
+	ClipLower    float32
+	LayerIndex   uint32
+}
+
+// Training state management
+type GPUTrainingState struct {
+	epoch           int
+	batch           int
+	currentLoss     float32
+	learningRate    float32
+	clippingEnabled bool
+	clipUpper       float32
+	clipLower       float32
 }
 
 // Initialize GPU compute for the network
 func (n *Network[T]) InitializeOptimizedGPU() error {
-	typ := reflect.TypeOf(*new(T)).Kind()
-
-	switch typ {
-	case reflect.Float32, reflect.Int32, reflect.Uint32:
-		// Supported GPU types
-	default:
-		return fmt.Errorf("❌ WebGPU acceleration only supports f32, i32, or u32 numeric types — got: %v", typ)
+	// Only support float32 for now
+	if any(*new(T)).(T) != T(float32(0)) {
+		return fmt.Errorf("WebGPU only supports float32 networks currently")
 	}
 
-	ensureGPU()
+	// Initialize WebGPU context
+	if err := ensureGPU(); err != nil {
+		return fmt.Errorf("WebGPU initialization failed: %v", err)
+	}
 
-	n.gpu.optimized = &GPUCompute{
+	// Clear any existing GPU state
+	n.CleanupOptimizedGPU()
+
+	// Initialize optimized GPU compute
+	n.gpu.optimized = &GPUComputeEnhanced{
 		device: ctx.device,
 		queue:  ctx.queue,
 		debug:  n.Debug,
@@ -57,17 +103,45 @@ func (n *Network[T]) InitializeOptimizedGPU() error {
 	for l := 1; l <= n.OutputLayer; l++ {
 		layerCompute, err := n.createLayerCompute(l)
 		if err != nil {
+			n.CleanupOptimizedGPU()
 			return fmt.Errorf("failed to create compute for layer %d: %v", l, err)
 		}
 		n.gpu.optimized.layers = append(n.gpu.optimized.layers, layerCompute)
 	}
 
 	n.gpu.optimized.initialized = true
+	n.WebGPUNative = true
+
+	if n.Debug {
+		fmt.Printf("✅ Optimized WebGPU initialized with %d layers\n", len(n.gpu.optimized.layers))
+	}
+
+	return nil
+}
+
+// Initialize GPU training for the network
+func (n *Network[T]) InitializeGPUTraining() error {
+	if n.gpu.optimized == nil || !n.gpu.optimized.initialized {
+		return fmt.Errorf("base GPU compute not initialized")
+	}
+
+	// Use hybrid mode for now (GPU forward, CPU backward)
+	// This avoids atomic operations issues while providing GPU acceleration
+	n.gpu.optimized.trainingEnabled = true
+
+	if n.Debug {
+		fmt.Printf("✅ GPU training initialized in hybrid mode (GPU forward, CPU backward)\n")
+	}
+
 	return nil
 }
 
 // Create GPU compute resources for a single layer
 func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) {
+	if layerIdx <= 0 || layerIdx >= len(n.Layers) {
+		return nil, fmt.Errorf("invalid layer index: %d", layerIdx)
+	}
+
 	prevLayer := n.Layers[layerIdx-1]
 	currentLayer := n.Layers[layerIdx]
 
@@ -89,9 +163,8 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create shader module: %v", err)
 	}
-	defer module.Release() // Clean up after pipeline creation
 
-	// Create bind group layout first
+	// Create bind group layout
 	bindGroupLayout, err := ctx.device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
 		Label: fmt.Sprintf("Layer_%d_BindGroupLayout", layerIdx),
 		Entries: []wgpu.BindGroupLayoutEntry{
@@ -130,6 +203,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 		},
 	})
 	if err != nil {
+		module.Release()
 		return nil, fmt.Errorf("failed to create bind group layout: %v", err)
 	}
 
@@ -139,10 +213,10 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 		BindGroupLayouts: []*wgpu.BindGroupLayout{bindGroupLayout},
 	})
 	if err != nil {
+		module.Release()
 		bindGroupLayout.Release()
 		return nil, fmt.Errorf("failed to create pipeline layout: %v", err)
 	}
-	defer pipelineLayout.Release() // Clean up after pipeline creation
 
 	// Create compute pipeline
 	pipeline, err := ctx.device.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
@@ -154,11 +228,17 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 		},
 	})
 	if err != nil {
+		module.Release()
 		bindGroupLayout.Release()
+		pipelineLayout.Release()
 		return nil, fmt.Errorf("failed to create compute pipeline: %v", err)
 	}
 
-	// Create buffers
+	// Clean up intermediate resources
+	module.Release()
+	pipelineLayout.Release()
+
+	// Initialize layer compute structure
 	layerCompute := &GPULayerCompute{
 		pipeline:        pipeline,
 		bindGroupLayout: bindGroupLayout,
@@ -167,62 +247,10 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 		layerIndex:      layerIdx,
 	}
 
-	// Input buffer
-	layerCompute.inputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: fmt.Sprintf("Layer_%d_Input", layerIdx),
-		Size:  uint64(inputSize) * 4,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
-	})
-	if err != nil {
+	// Create buffers with proper error handling
+	if err := n.createLayerBuffers(layerCompute); err != nil {
 		layerCompute.cleanup()
-		return nil, fmt.Errorf("failed to create input buffer: %v", err)
-	}
-
-	// Output buffer
-	layerCompute.outputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: fmt.Sprintf("Layer_%d_Output", layerIdx),
-		Size:  uint64(outputSize) * 4,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
-	})
-	if err != nil {
-		layerCompute.cleanup()
-		return nil, fmt.Errorf("failed to create output buffer: %v", err)
-	}
-
-	// Staging buffer for CPU readback
-	layerCompute.stagingBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: fmt.Sprintf("Layer_%d_Staging", layerIdx),
-		Size:  uint64(outputSize) * 4,
-		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		layerCompute.cleanup()
-		return nil, fmt.Errorf("failed to create staging buffer: %v", err)
-	}
-
-	// Prepare weight and bias data
-	weights, biases := n.extractLayerWeightsAndBiases(layerIdx)
-
-	// Weight buffer
-	layerCompute.weightBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    fmt.Sprintf("Layer_%d_Weights", layerIdx),
-		Contents: wgpu.ToBytes(weights),
-		Usage:    wgpu.BufferUsageStorage,
-	})
-	if err != nil {
-		layerCompute.cleanup()
-		return nil, fmt.Errorf("failed to create weight buffer: %v", err)
-	}
-
-	// Bias buffer
-	layerCompute.biasBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    fmt.Sprintf("Layer_%d_Biases", layerIdx),
-		Contents: wgpu.ToBytes(biases),
-		Usage:    wgpu.BufferUsageStorage,
-	})
-	if err != nil {
-		layerCompute.cleanup()
-		return nil, fmt.Errorf("failed to create bias buffer: %v", err)
+		return nil, fmt.Errorf("failed to create buffers: %v", err)
 	}
 
 	// Create bind group
@@ -242,7 +270,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	}
 
 	// Calculate optimal workgroup dimensions
-	layerCompute.workgroupsX = (outputSize + 255) / 256 // 256 threads per workgroup
+	layerCompute.workgroupsX = (outputSize + 255) / 256
 	layerCompute.workgroupsY = 1
 
 	if n.Debug {
@@ -254,8 +282,68 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	return layerCompute, nil
 }
 
+func (n *Network[T]) createLayerBuffers(lc *GPULayerCompute) error {
+	var err error
+
+	// Input buffer
+	lc.inputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: fmt.Sprintf("Layer_%d_Input", lc.layerIndex),
+		Size:  uint64(lc.inputSize) * 4,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create input buffer: %v", err)
+	}
+
+	// Output buffer
+	lc.outputBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: fmt.Sprintf("Layer_%d_Output", lc.layerIndex),
+		Size:  uint64(lc.outputSize) * 4,
+		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create output buffer: %v", err)
+	}
+
+	// Staging buffer for CPU readback
+	lc.stagingBuffer, err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: fmt.Sprintf("Layer_%d_Staging", lc.layerIndex),
+		Size:  uint64(lc.outputSize) * 4,
+		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create staging buffer: %v", err)
+	}
+
+	// Prepare weight and bias data
+	weights, biases := n.extractLayerWeightsAndBiases(lc.layerIndex)
+
+	// Weight buffer
+	lc.weightBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    fmt.Sprintf("Layer_%d_Weights", lc.layerIndex),
+		Contents: wgpu.ToBytes(weights),
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create weight buffer: %v", err)
+	}
+
+	// Bias buffer
+	lc.biasBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    fmt.Sprintf("Layer_%d_Biases", lc.layerIndex),
+		Contents: wgpu.ToBytes(biases),
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst | wgpu.BufferUsageCopySrc,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create bias buffer: %v", err)
+	}
+
+	return nil
+}
+
 // Helper method to clean up a layer's resources
 func (lc *GPULayerCompute) cleanup() {
+	// Forward pass cleanup
 	if lc.inputBuffer != nil {
 		lc.inputBuffer.Destroy()
 	}
@@ -271,14 +359,48 @@ func (lc *GPULayerCompute) cleanup() {
 	if lc.stagingBuffer != nil {
 		lc.stagingBuffer.Destroy()
 	}
+
+	// Training cleanup
+	if lc.errorInputBuffer != nil {
+		lc.errorInputBuffer.Destroy()
+	}
+	if lc.errorOutputBuffer != nil {
+		lc.errorOutputBuffer.Destroy()
+	}
+	if lc.weightGradBuffer != nil {
+		lc.weightGradBuffer.Destroy()
+	}
+	if lc.biasGradBuffer != nil {
+		lc.biasGradBuffer.Destroy()
+	}
+	if lc.paramsBuffer != nil {
+		lc.paramsBuffer.Destroy()
+	}
+	if lc.errorStagingBuffer != nil {
+		lc.errorStagingBuffer.Destroy()
+	}
+	if lc.gradStagingBuffer != nil {
+		lc.gradStagingBuffer.Destroy()
+	}
+
+	// Release bind groups and pipelines
 	if lc.bindGroup != nil {
 		lc.bindGroup.Release()
+	}
+	if lc.backwardBindGroup != nil {
+		lc.backwardBindGroup.Release()
 	}
 	if lc.bindGroupLayout != nil {
 		lc.bindGroupLayout.Release()
 	}
+	if lc.backwardLayout != nil {
+		lc.backwardLayout.Release()
+	}
 	if lc.pipeline != nil {
 		lc.pipeline.Release()
+	}
+	if lc.backwardPipeline != nil {
+		lc.backwardPipeline.Release()
 	}
 }
 
@@ -316,7 +438,6 @@ func (n *Network[T]) generateLayerShader(layerIdx int, inputSize, outputSize uin
 	`, typ, typ, typ, typ, activationCode, outputSize, typ, inputSize, inputSize)
 }
 
-// relu,sigmoid,tanh,leaky_relu,elu,linear
 // Get activation function WGSL code
 func getActivationCode(activation, typ string) string {
 	switch activation {
@@ -367,7 +488,6 @@ func getActivationCode(activation, typ string) string {
 		}`
 
 	case "tanh":
-		// 1) the single piecewise approximation
 		const tanhApprox = `
 fn tanh_approx(input: f32) -> f32 {
     if (input >  1.0) { return  1.0; }
@@ -385,7 +505,6 @@ fn tanh_approx(input: f32) -> f32 {
 }
 `
 
-		// 2) f32 is trivial
 		if typ == "f32" {
 			return tanhApprox + `
 fn activate(x: f32) -> f32 {
@@ -393,7 +512,6 @@ fn activate(x: f32) -> f32 {
 }`
 		}
 
-		// 3) i32: cast to f32, approx, cast back (truncates toward zero exactly like Go’s conversion)
 		if typ == "i32" || typ == "int32" {
 			return tanhApprox + `
 fn activate(x: i32) -> i32 {
@@ -401,17 +519,14 @@ fn activate(x: i32) -> i32 {
 }`
 		}
 
-		// 4) u32: cast to f32, approx, clamp negative→0, cast back
 		if typ == "u32" || typ == "uint32" {
 			return tanhApprox + `
 fn activate(x: u32) -> u32 {
     let t = tanh_approx(f32(x));
-    // clamp any negative result to zero before casting
     return u32(max(t, 0.0));
 }`
 		}
 
-		// 5) everything else falls back to identity
 		return fmt.Sprintf(`fn activate(x: %s) -> %s { return x; }`, typ, typ)
 
 	case "sigmoid":
@@ -447,22 +562,51 @@ func (n *Network[T]) extractLayerWeightsAndBiases(layerIdx int) ([]T, []T) {
 	weights := make([]T, outputSize*inputSize)
 	biases := make([]T, outputSize)
 
+	// Debug: Print layer info
+	if n.Debug {
+		fmt.Printf("Extracting weights for layer %d: input=%d, output=%d\n",
+			layerIdx, inputSize, outputSize)
+	}
+
 	for y := 0; y < currentLayer.Height; y++ {
 		for x := 0; x < currentLayer.Width; x++ {
 			neuronIdx := y*currentLayer.Width + x
 			neuron := currentLayer.Neurons[y][x]
 
 			// Extract bias
-			biases[neuronIdx] = T(any(neuron.Bias).(T))
+			biases[neuronIdx] = neuron.Bias
 
-			// Extract weights in proper order for matrix multiplication
+			// CRITICAL FIX: Extract weights in the same order as CPU connections
 			weightOffset := neuronIdx * inputSize
-			for i, conn := range neuron.Inputs {
-				if i < inputSize {
-					weights[weightOffset+i] = T(any(conn.Weight).(T))
+
+			// Create a map to ensure correct weight ordering
+			weightMap := make(map[int]T)
+
+			for _, conn := range neuron.Inputs {
+				// Calculate the linear index in the same way as CPU
+				srcIdx := conn.SourceY*prevLayer.Width + conn.SourceX
+				if srcIdx < inputSize {
+					weightMap[srcIdx] = conn.Weight
+				}
+			}
+
+			// Fill weights array in proper order
+			for i := 0; i < inputSize; i++ {
+				if weight, exists := weightMap[i]; exists {
+					weights[weightOffset+i] = weight
+				} else {
+					// This shouldn't happen in a fully connected layer
+					weights[weightOffset+i] = T(0)
+					if n.Debug {
+						fmt.Printf("Warning: missing weight for neuron %d, input %d\n", neuronIdx, i)
+					}
 				}
 			}
 		}
+	}
+
+	if n.Debug {
+		fmt.Printf("Extracted %d weights and %d biases\n", len(weights), len(biases))
 	}
 
 	return weights, biases
@@ -470,65 +614,181 @@ func (n *Network[T]) extractLayerWeightsAndBiases(layerIdx int) ([]T, []T) {
 
 // Optimized forward pass using proper GPU parallelization
 func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
-	if !n.gpu.optimized.initialized {
+	if n.gpu.optimized == nil || !n.gpu.optimized.initialized {
 		return fmt.Errorf("optimized GPU not initialized")
 	}
 
-	var inputData []T
-	inputData = make([]T, 0, len(inputs)*len(inputs[0]))
+	if len(n.gpu.optimized.layers) == 0 {
+		return fmt.Errorf("no GPU layers available")
+	}
+
+	// Convert input data to float32
+	inputData := make([]float32, 0, len(inputs)*len(inputs[0]))
 	for _, row := range inputs {
 		for _, val := range row {
-			inputData = append(inputData, T(val))
+			inputData = append(inputData, float32(val))
 		}
 	}
 
+	// Set input layer values (matching CPU behavior)
+	inputLayer := &n.Layers[n.InputLayer]
+	idx := 0
+	for y := 0; y < inputLayer.Height; y++ {
+		for x := 0; x < inputLayer.Width; x++ {
+			if idx < len(inputData) {
+				inputLayer.Neurons[y][x].Value = T(inputData[idx])
+				idx++
+			}
+		}
+	}
+
+	// Process layers sequentially with proper synchronization
+	for i, layerCompute := range n.gpu.optimized.layers {
+		if err := n.processGPULayer(i, layerCompute, inputData); err != nil {
+			return fmt.Errorf("failed to process layer %d: %v", i+1, err)
+		}
+
+		// Update inputData for next layer
+		if i < len(n.gpu.optimized.layers)-1 {
+			layerOutput, err := n.readLayerOutput(layerCompute)
+			if err != nil {
+				return fmt.Errorf("failed to read layer %d output: %v", i+1, err)
+			}
+			inputData = layerOutput
+		}
+	}
+
+	// Read final output and apply to network
+	finalLayer := n.gpu.optimized.layers[len(n.gpu.optimized.layers)-1]
+	finalOutput, err := n.readLayerOutput(finalLayer)
+	if err != nil {
+		return fmt.Errorf("failed to read final output: %v", err)
+	}
+
+	// Apply final output to network neurons
+	n.applyFinalOutputFixed(finalOutput)
+
+	return nil
+}
+
+// Read layer output with improved synchronization
+func (n *Network[T]) readLayerOutput(lc *GPULayerCompute) ([]float32, error) {
+	done := make(chan wgpu.BufferMapAsyncStatus, 1)
+
+	err := lc.stagingBuffer.MapAsync(wgpu.MapModeRead, 0, lc.stagingBuffer.GetSize(),
+		func(status wgpu.BufferMapAsyncStatus) {
+			done <- status
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to map buffer: %v", err)
+	}
+
+	// Wait for mapping with timeout
+	timeout := time.After(5 * time.Second)
+	for {
+		ctx.device.Poll(true, nil)
+		select {
+		case status := <-done:
+			if status != wgpu.BufferMapAsyncStatusSuccess {
+				return nil, fmt.Errorf("buffer mapping failed: %v", status)
+			}
+			goto readData
+		case <-timeout:
+			return nil, fmt.Errorf("buffer mapping timeout")
+		default:
+			time.Sleep(time.Microsecond * 100)
+		}
+	}
+
+readData:
+	data := lc.stagingBuffer.GetMappedRange(0, uint(lc.outputSize*4))
+	if data == nil {
+		lc.stagingBuffer.Unmap()
+		return nil, fmt.Errorf("failed to get mapped range")
+	}
+
+	result := make([]float32, lc.outputSize)
+	copy(result, wgpu.FromBytes[float32](data))
+	lc.stagingBuffer.Unmap()
+
+	return result, nil
+}
+
+// Fixed output application
+func (n *Network[T]) applyFinalOutputFixed(output []float32) {
+	outputLayer := &n.Layers[n.OutputLayer]
+	idx := 0
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			if idx < len(output) {
+				outputLayer.Neurons[y][x].Value = T(output[idx])
+				idx++
+			}
+		}
+	}
+
+	// Apply softmax if needed
+	if len(outputLayer.Neurons) > 0 && len(outputLayer.Neurons[0]) > 0 &&
+		outputLayer.Neurons[0][0].Activation == "softmax" {
+		n.ApplySoftmax()
+	}
+
+	if n.Debug {
+		fmt.Printf("Applied %d values to output layer\n", len(output))
+	}
+}
+
+func (n *Network[T]) applyLayerOutput(layerIdx int, output []T) {
+	if layerIdx < 0 || layerIdx >= len(n.Layers) {
+		return
+	}
+
+	layer := &n.Layers[layerIdx]
+	idx := 0
+	for y := 0; y < layer.Height; y++ {
+		for x := 0; x < layer.Width; x++ {
+			if idx < len(output) {
+				layer.Neurons[y][x].Value = output[idx]
+				idx++
+			}
+		}
+	}
+
+	if n.Debug {
+		fmt.Printf("Applied %d values to layer %d\n", len(output), layerIdx)
+	}
+}
+
+func (n *Network[T]) processGPULayer(layerIndex int, lc *GPULayerCompute, inputData []float32) error {
 	// Create command encoder
-	encoder, err := ctx.device.CreateCommandEncoder(nil)
+	encoder, err := ctx.device.CreateCommandEncoder(&wgpu.CommandEncoderDescriptor{
+		Label: fmt.Sprintf("Layer_%d_Commands", layerIndex+1),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create command encoder: %v", err)
 	}
 
-	// Process each layer sequentially but with full GPU parallelization within each layer
-	//var currentInput []T = inputData
+	// Upload input data
+	ctx.queue.WriteBuffer(lc.inputBuffer, 0, wgpu.ToBytes(inputData))
 
-	for i, layerCompute := range n.gpu.optimized.layers {
-		// Upload input data to GPU
-		ctx.queue.WriteBuffer(layerCompute.inputBuffer, 0, wgpu.ToBytes(inputData))
+	// Create compute pass
+	computePass := encoder.BeginComputePass(&wgpu.ComputePassDescriptor{
+		Label: fmt.Sprintf("Layer_%d_Compute", layerIndex+1),
+	})
 
-		// Create compute pass for this layer
-		computePass := encoder.BeginComputePass(&wgpu.ComputePassDescriptor{
-			Label: fmt.Sprintf("Layer_%d_Compute", i+1),
-		})
+	computePass.SetPipeline(lc.pipeline)
+	computePass.SetBindGroup(0, lc.bindGroup, nil)
+	computePass.DispatchWorkgroups(lc.workgroupsX, lc.workgroupsY, 1)
+	computePass.End()
 
-		computePass.SetPipeline(layerCompute.pipeline)
-		computePass.SetBindGroup(0, layerCompute.bindGroup, nil)
+	// Copy output to staging buffer
+	encoder.CopyBufferToBuffer(
+		lc.outputBuffer, 0,
+		lc.stagingBuffer, 0,
+		uint64(lc.outputSize)*4,
+	)
 
-		// Dispatch with optimal workgroup size
-		computePass.DispatchWorkgroups(layerCompute.workgroupsX, layerCompute.workgroupsY, 1)
-		computePass.End()
-
-		// Copy output to staging buffer for readback (only for final layer or if debugging)
-		if i == len(n.gpu.optimized.layers)-1 || n.Debug {
-			encoder.CopyBufferToBuffer(
-				layerCompute.outputBuffer, 0,
-				layerCompute.stagingBuffer, 0,
-				uint64(layerCompute.outputSize)*4,
-			)
-		}
-
-		// For next iteration, we need to read the output as input
-		// This is the bottleneck we need to minimize
-		if i < len(n.gpu.optimized.layers)-1 {
-			nextLayerCompute := n.gpu.optimized.layers[i+1]
-			encoder.CopyBufferToBuffer(
-				layerCompute.outputBuffer, 0,
-				nextLayerCompute.inputBuffer, 0,
-				uint64(layerCompute.outputSize)*4,
-			)
-		}
-	}
-
-	// Submit all commands at once
+	// Submit commands
 	commandBuffer, err := encoder.Finish(nil)
 	if err != nil {
 		return fmt.Errorf("failed to finish command encoder: %v", err)
@@ -536,18 +796,12 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 
 	ctx.queue.Submit(commandBuffer)
 
-	// Wait for completion and read final results
-	ctx.device.Poll(true, nil)
-
-	// Read final layer output
-	finalLayer := n.gpu.optimized.layers[len(n.gpu.optimized.layers)-1]
-	finalOutput, err := n.readStagingBuffer(finalLayer.stagingBuffer, int(finalLayer.outputSize))
-	if err != nil {
-		return fmt.Errorf("failed to read final output: %v", err)
+	// Wait for completion with timeout
+	start := time.Now()
+	for time.Since(start) < time.Second*5 {
+		ctx.device.Poll(true, nil)
+		time.Sleep(time.Millisecond)
 	}
-
-	// Apply results to network
-	n.applyFinalOutput(finalOutput)
 
 	return nil
 }
@@ -564,7 +818,8 @@ func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]T, erro
 		return nil, fmt.Errorf("failed to map buffer: %v", err)
 	}
 
-	// Poll until mapped
+	// Poll until mapped with timeout
+	timeout := 0
 	for {
 		ctx.device.Poll(true, nil)
 		select {
@@ -574,7 +829,11 @@ func (n *Network[T]) readStagingBuffer(buffer *wgpu.Buffer, size int) ([]T, erro
 			}
 			goto readData
 		default:
-			continue
+			timeout++
+			if timeout > 10000 { // Prevent infinite loop
+				return nil, fmt.Errorf("buffer mapping timeout")
+			}
+			time.Sleep(time.Microsecond * 10)
 		}
 	}
 
@@ -585,8 +844,14 @@ readData:
 		return nil, fmt.Errorf("failed to get mapped range")
 	}
 
+	// Convert from float32 to T
+	floatData := wgpu.FromBytes[float32](data)
 	result := make([]T, size)
-	copy(result, wgpu.FromBytes[T](data))
+	for i, v := range floatData {
+		if i < len(result) {
+			result[i] = T(v)
+		}
+	}
 	buffer.Unmap()
 
 	return result, nil
@@ -604,106 +869,13 @@ func (n *Network[T]) applyFinalOutput(output []T) {
 			}
 		}
 	}
-	if outputLayer.Neurons[0][0].Activation == "softmax" {
+
+	// Apply softmax if needed
+	if len(outputLayer.Neurons) > 0 && len(outputLayer.Neurons[0]) > 0 &&
+		outputLayer.Neurons[0][0].Activation == "softmax" {
 		n.ApplySoftmax()
 	}
 }
-
-// Pipeline GPU computation using double buffering to reduce CPU-GPU sync
-func (n *Network[T]) ForwardGPUPipelined(inputs [][]float64) error {
-	if len(n.gpu.optimized.layers) < 2 {
-		return n.ForwardGPUOptimized(inputs) // Fall back to sequential
-	}
-
-	// Convert input
-	inputData := make([]float32, 0, len(inputs)*len(inputs[0]))
-	for _, row := range inputs {
-		for _, val := range row {
-			inputData = append(inputData, float32(val))
-		}
-	}
-
-	// Create multiple command encoders for pipelining
-	encoders := make([]*wgpu.CommandEncoder, 0)
-
-	// First layer
-	encoder1, _ := ctx.device.CreateCommandEncoder(nil)
-	encoders = append(encoders, encoder1)
-
-	layer0 := n.gpu.optimized.layers[0]
-	ctx.queue.WriteBuffer(layer0.inputBuffer, 0, wgpu.ToBytes(inputData))
-
-	pass1 := encoder1.BeginComputePass(nil)
-	pass1.SetPipeline(layer0.pipeline)
-	pass1.SetBindGroup(0, layer0.bindGroup, nil)
-	pass1.DispatchWorkgroups(layer0.workgroupsX, layer0.workgroupsY, 1)
-	pass1.End()
-
-	// Copy to next layer's input
-	if len(n.gpu.optimized.layers) > 1 {
-		nextLayer := n.gpu.optimized.layers[1]
-		encoder1.CopyBufferToBuffer(
-			layer0.outputBuffer, 0,
-			nextLayer.inputBuffer, 0,
-			uint64(layer0.outputSize)*4,
-		)
-	}
-
-	// Submit first layer
-	cmd1, _ := encoder1.Finish(nil)
-	ctx.queue.Submit(cmd1)
-
-	// Process remaining layers with overlapping
-	for i := 1; i < len(n.gpu.optimized.layers); i++ {
-		encoder, _ := ctx.device.CreateCommandEncoder(nil)
-		layer := n.gpu.optimized.layers[i]
-
-		pass := encoder.BeginComputePass(nil)
-		pass.SetPipeline(layer.pipeline)
-		pass.SetBindGroup(0, layer.bindGroup, nil)
-		pass.DispatchWorkgroups(layer.workgroupsX, layer.workgroupsY, 1)
-		pass.End()
-
-		// Copy to staging for final layer
-		if i == len(n.gpu.optimized.layers)-1 {
-			encoder.CopyBufferToBuffer(
-				layer.outputBuffer, 0,
-				layer.stagingBuffer, 0,
-				uint64(layer.outputSize)*4,
-			)
-		} else {
-			// Copy to next layer
-			nextLayer := n.gpu.optimized.layers[i+1]
-			encoder.CopyBufferToBuffer(
-				layer.outputBuffer, 0,
-				nextLayer.inputBuffer, 0,
-				uint64(layer.outputSize)*4,
-			)
-		}
-
-		cmd, _ := encoder.Finish(nil)
-		ctx.queue.Submit(cmd)
-	}
-
-	// Wait and read final results
-	ctx.device.Poll(true, nil)
-	finalLayer := n.gpu.optimized.layers[len(n.gpu.optimized.layers)-1]
-	finalOutput, err := n.readStagingBuffer(finalLayer.stagingBuffer, int(finalLayer.outputSize))
-	if err != nil {
-		return err
-	}
-
-	n.applyFinalOutput(finalOutput)
-	return nil
-}
-
-// Add this to your Network struct's gpu field:
-/*
-type gpuResources struct {
-	// ... existing fields ...
-	optimized *GPUCompute  // Add this field
-}
-*/
 
 // Update the main Forward method to use optimized GPU
 func (n *Network[T]) Forward(inputs [][]float64) {
@@ -712,7 +884,7 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 		err := n.ForwardGPUOptimized(inputs)
 		if err != nil {
 			if n.Debug {
-				fmt.Printf("Optimized GPU forward failed, falling back to CPU: %v\n", err)
+				fmt.Printf("⚠️ Optimized GPU forward failed, falling back to CPU: %v\n", err)
 			}
 			// Fall back to CPU
 			n.forwardCPU(inputs)
@@ -724,6 +896,56 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 	n.forwardCPU(inputs)
 }
 
+// Train a single sample using hybrid GPU/CPU approach
+func (n *Network[T]) TrainSampleGPU(
+	input [][]float64,
+	target [][]float64,
+	learningRate float64,
+	clipUpper T,
+	clipLower T,
+) error {
+	// Use hybrid approach: GPU forward pass + CPU backward pass
+	// This avoids the atomic operations issues while still getting GPU acceleration
+
+	// GPU forward pass
+	if n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized {
+		err := n.ForwardGPUOptimized(input)
+		if err != nil {
+			if n.Debug {
+				fmt.Printf("⚠️ GPU forward failed, using CPU: %v\n", err)
+			}
+			// Fallback to CPU forward if GPU fails
+			n.Forward(input)
+		}
+	} else {
+		// CPU forward pass
+		n.Forward(input)
+	}
+
+	// CPU backward pass (more reliable than GPU for now)
+	n.Backward(target, learningRate, clipUpper, clipLower)
+
+	return nil
+}
+
+// Monitoring and debugging functions
+func (n *Network[T]) GetGPUTrainingStats() map[string]interface{} {
+	if n.gpu.optimized == nil {
+		return map[string]interface{}{
+			"gpu_enabled": false,
+		}
+	}
+
+	stats := map[string]interface{}{
+		"gpu_enabled":      n.gpu.optimized.initialized,
+		"training_mode":    "hybrid", // GPU forward, CPU backward
+		"num_layers":       len(n.gpu.optimized.layers),
+		"training_enabled": n.gpu.optimized.trainingEnabled,
+	}
+
+	return stats
+}
+
 // Clean up GPU resources
 func (n *Network[T]) CleanupOptimizedGPU() {
 	if n.gpu.optimized == nil {
@@ -731,27 +953,35 @@ func (n *Network[T]) CleanupOptimizedGPU() {
 	}
 
 	for i, layer := range n.gpu.optimized.layers {
-		if layer.inputBuffer != nil {
-			layer.inputBuffer.Destroy()
-		}
-		if layer.outputBuffer != nil {
-			layer.outputBuffer.Destroy()
-		}
-		if layer.weightBuffer != nil {
-			layer.weightBuffer.Destroy()
-		}
-		if layer.biasBuffer != nil {
-			layer.biasBuffer.Destroy()
-		}
-		if layer.stagingBuffer != nil {
-			layer.stagingBuffer.Destroy()
-		}
+		layer.cleanup()
 		if n.Debug {
 			fmt.Printf("Cleaned up GPU resources for layer %d\n", i)
 		}
 	}
 
 	n.gpu.optimized.layers = nil
+	n.gpu.optimized.trainingLayers = nil
 	n.gpu.optimized.initialized = false
+	n.gpu.optimized.trainingEnabled = false
 	n.gpu.optimized = nil
+}
+
+func (n *Network[T]) IsGPUAvailable() bool {
+	return n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized
+}
+
+func (n *Network[T]) GetGPUStatus() string {
+	if !n.WebGPUNative {
+		return "disabled"
+	}
+
+	if n.gpu.optimized == nil {
+		return "not_initialized"
+	}
+
+	if !n.gpu.optimized.initialized {
+		return "initialization_failed"
+	}
+
+	return "active"
 }

@@ -51,7 +51,7 @@ type Connection[T Numeric] struct {
 
 // Network encapsulates the entire model
 type Network[T Numeric] struct {
-	GrowthHistory []GrowthLog `json:"growth_history,omitempty"`
+	TrainingState *GPUTrainingState
 	Layers        []Grid[T]
 	InputLayer    int
 	OutputLayer   int
@@ -82,8 +82,42 @@ type Network[T Numeric] struct {
 		batchStgBuf    *wgpu.Buffer
 		batchPipeline  *wgpu.ComputePipeline
 		batchBindGroup *wgpu.BindGroup
-		optimized      *GPUCompute
+
+		trainingLayers  []*GPUTrainingCompute
+		trainingEnabled bool
+
+		// Enhanced optimized field
+		optimized *GPUComputeEnhanced
 	}
+}
+
+// Enhanced GPULayerCompute with training fields
+type GPULayerComputeEnhanced struct {
+	// All existing fields from GPULayerCompute
+	pipeline        *wgpu.ComputePipeline
+	bindGroup       *wgpu.BindGroup
+	bindGroupLayout *wgpu.BindGroupLayout
+	inputBuffer     *wgpu.Buffer
+	outputBuffer    *wgpu.Buffer
+	weightBuffer    *wgpu.Buffer
+	biasBuffer      *wgpu.Buffer
+	stagingBuffer   *wgpu.Buffer
+	workgroupsX     uint32
+	workgroupsY     uint32
+	inputSize       uint32
+	outputSize      uint32
+	layerIndex      int
+
+	// Training additions
+	backwardPipeline   *wgpu.ComputePipeline
+	backwardBindGroup  *wgpu.BindGroup
+	errorInputBuffer   *wgpu.Buffer
+	errorOutputBuffer  *wgpu.Buffer
+	weightGradBuffer   *wgpu.Buffer
+	biasGradBuffer     *wgpu.Buffer
+	paramsBuffer       *wgpu.Buffer
+	errorStagingBuffer *wgpu.Buffer
+	gradStagingBuffer  *wgpu.Buffer
 }
 
 // NewNetwork initializes a network with specified layer sizes, activations, and connectivity
@@ -97,22 +131,19 @@ func NewNetwork[T Numeric](
 	}
 
 	n := &Network[T]{
-		TypeName:      reflect.TypeOf(*new(T)).Name(),
-		Layers:        make([]Grid[T], len(layerSizes)),
-		InputLayer:    0,
-		OutputLayer:   len(layerSizes) - 1,
-		Performance:   NewADHDPerformance(),
-		ReplayStats:   make(map[int][]int),
-		GrowthHistory: []GrowthLog{}, // ✅ Ensure safe append
+		TypeName:     reflect.TypeOf(*new(T)).Name(),
+		Layers:       make([]Grid[T], len(layerSizes)),
+		InputLayer:   0,
+		OutputLayer:  len(layerSizes) - 1,
+		Performance:  NewADHDPerformance(),
+		ReplayStats:  make(map[int][]int),
+		WebGPUNative: false, // Start with false, enable after successful init
 	}
 
 	// Set the WGSL type in the gpu struct based on T
 	n.gpu.wgslType = getWGSLType[T]()
 
-	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
-		n.BuildGPUKernels()
-	}
-
+	// Create neural network layers first
 	idCounter := 0
 	for i, size := range layerSizes {
 		grid := Grid[T]{
@@ -123,7 +154,7 @@ func NewNetwork[T Numeric](
 		for y := 0; y < size.Height; y++ {
 			grid.Neurons[y] = make([]*Neuron[T], size.Width)
 			for x := 0; x < size.Width; x++ {
-				var zero T // default zero value for T (e.g., 0 for float32)
+				var zero T
 				grid.Neurons[y][x] = &Neuron[T]{
 					ID:         idCounter,
 					Bias:       zero,
@@ -137,6 +168,21 @@ func NewNetwork[T Numeric](
 	}
 
 	n.ConnectLayers(fullyConnected)
+
+	// Initialize GPU if supported (only for float32)
+	if any(*new(T)).(T) == T(float32(0)) {
+		err := n.InitializeOptimizedGPU()
+		if err != nil {
+			fmt.Printf("⚠️ GPU initialization failed: %v, using CPU only\n", err)
+		} else {
+			n.WebGPUNative = true // Only set to true after successful initialization
+			err = n.InitializeGPUTraining()
+			if err != nil {
+				fmt.Printf("⚠️ GPU training initialization failed: %v\n", err)
+			}
+		}
+	}
+
 	return n
 }
 
@@ -567,91 +613,6 @@ func (n *Network[T]) Backward(
 }
 
 // Train runs the training loop
-func (n *Network[T]) Train(
-	inputs [][][]float64,
-	targets [][][]float64,
-	epochs int,
-	learningRate float64,
-	earlyStopOnNegativeLoss bool,
-	clipUpper T,
-	clipLower T,
-) {
-	for epoch := 0; epoch < epochs; epoch++ {
-		totalLoss := 0.0
-		perm := rand.Perm(len(inputs))
-		shuffledInputs := make([][][]float64, len(inputs))
-		shuffledTargets := make([][][]float64, len(targets))
-		for i, p := range perm {
-			shuffledInputs[i] = inputs[p]
-			shuffledTargets[i] = targets[p]
-		}
-
-		for b := 0; b < len(shuffledInputs); b++ {
-			n.Forward(shuffledInputs[b])
-			loss := n.ComputeLoss(shuffledTargets[b])
-			if math.IsNaN(loss) {
-				fmt.Printf("NaN loss detected at sample %d, epoch %d\n", b, epoch)
-				continue
-			}
-			if earlyStopOnNegativeLoss && loss < 0 {
-				fmt.Printf("⚠️ Negative loss (%.4f) detected at sample %d, epoch %d. Stopping training early.\n", loss, b, epoch)
-				return
-			}
-			totalLoss += loss
-			n.Backward(shuffledTargets[b], learningRate, clipUpper, clipLower)
-		}
-
-		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
-	}
-}
-
-func (n *Network[T]) TrainTest(
-	inputs [][][]float64,
-	targets [][][]float64,
-	epochs int,
-	learningRate float64,
-	earlyStopOnNegativeLoss bool,
-	clipUpper T,
-	clipLower T,
-) {
-	const lambda = 0.01
-
-	for epoch := 0; epoch < epochs; epoch++ {
-		totalLoss := 0.0
-		perm := rand.Perm(len(inputs))
-		shuffledInputs := make([][][]float64, len(inputs))
-		shuffledTargets := make([][][]float64, len(targets))
-		for i, p := range perm {
-			shuffledInputs[i] = inputs[p]
-			shuffledTargets[i] = targets[p]
-		}
-
-		for b := 0; b < len(shuffledInputs); b++ {
-			n.ResetReplayStats()
-			n.Forward(shuffledInputs[b])
-
-			loss := n.ComputeLoss(shuffledTargets[b])
-			totalReplays := n.TotalReplayThisSample()
-			avgEntropy := n.AvgEntropyThisSample()
-			penalty := lambda * float64(totalReplays) * (1.0 - avgEntropy)
-			loss += penalty
-
-			if math.IsNaN(loss) {
-				fmt.Printf("NaN loss detected at sample %d, epoch %d\n", b, epoch)
-				continue
-			}
-			if earlyStopOnNegativeLoss && loss < 0 {
-				fmt.Printf("⚠️  Negative loss (%.4f) at sample %d, epoch %d. Early stopping.\n", loss, b, epoch)
-				return
-			}
-
-			totalLoss += loss
-			n.Backward(shuffledTargets[b], learningRate, clipUpper, clipLower)
-		}
-
-		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
-	}
-}
 
 func (n *Network[T]) AvgEntropyThisSample() float64 {
 	totalEntropy := 0.0
@@ -667,39 +628,6 @@ func (n *Network[T]) AvgEntropyThisSample() float64 {
 		return 0.0
 	}
 	return totalEntropy / float64(num)
-}
-
-func (n *Network[T]) TrainTestWithLambda(
-	inputs, targets [][][]float64,
-	epochs int,
-	learningRate float64,
-	earlyStopOnNegativeLoss bool,
-	lambda float64,
-	clipUpper T,
-	clipLower T,
-) {
-	for epoch := 0; epoch < epochs; epoch++ {
-		totalLoss := 0.0
-		perm := rand.Perm(len(inputs))
-
-		for _, i := range perm {
-			n.ResetReplayStats()
-			n.Forward(inputs[i])
-
-			loss := n.ComputeLoss(targets[i])
-			replayPenalty := float64(n.TotalReplayThisSample())
-			loss += lambda * replayPenalty
-
-			if math.IsNaN(loss) || (earlyStopOnNegativeLoss && loss < 0) {
-				continue
-			}
-
-			totalLoss += loss
-			n.Backward(targets[i], learningRate, clipUpper, clipLower)
-		}
-
-		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
-	}
 }
 
 func (n *Network[T]) TotalReplayThisSample() int {
@@ -1012,4 +940,72 @@ func NewNetworkRandomized[T Numeric](
 	}
 
 	return n
+}
+
+func (n *Network[T]) TrainSample(
+	input [][]float64,
+	target [][]float64,
+	learningRate float64,
+	clipUpper T,
+	clipLower T,
+) error {
+	// Use hybrid GPU/CPU training if available
+	if n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized {
+		// GPU forward pass
+		err := n.ForwardGPUOptimized(input)
+		if err != nil {
+			if n.Debug {
+				fmt.Printf("⚠️ GPU forward failed, using CPU: %v\n", err)
+			}
+			// Fallback to CPU forward
+			n.Forward(input)
+		}
+	} else {
+		// CPU forward pass
+		n.Forward(input)
+	}
+
+	// Always use CPU backward pass (more reliable)
+	n.Backward(target, learningRate, clipUpper, clipLower)
+	return nil
+}
+
+func (n *Network[T]) Train(
+	inputs [][][]float64,
+	targets [][][]float64,
+	epochs int,
+	learningRate float64,
+	clipUpper T,
+	clipLower T,
+) {
+	// Check GPU availability
+	gpuAvailable := n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized
+
+	if gpuAvailable {
+		fmt.Println("🚀 Training with GPU acceleration (hybrid mode)")
+	} else {
+		fmt.Println("🧠 Training on CPU...")
+	}
+
+	for epoch := 0; epoch < epochs; epoch++ {
+		totalLoss := 0.0
+
+		for i := 0; i < len(inputs); i++ {
+			err := n.TrainSample(inputs[i], targets[i], learningRate, clipUpper, clipLower)
+			if err != nil && n.Debug {
+				fmt.Printf("⚠️ Training sample %d failed: %v\n", i, err)
+			}
+
+			loss := n.ComputeLoss(targets[i])
+			totalLoss += loss
+		}
+
+		avgLoss := totalLoss / float64(len(inputs))
+
+		if gpuAvailable {
+			fmt.Printf("  GPU Epoch %d: avg loss = %f\n", epoch+1, avgLoss)
+		} else {
+			fmt.Printf("  CPU Epoch %d: avg loss = %f\n", epoch+1, avgLoss)
+		}
+	}
 }

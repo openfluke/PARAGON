@@ -14,24 +14,45 @@ type gpuContext struct {
 	device   *wgpu.Device
 	queue    *wgpu.Queue
 	once     sync.Once
+	initErr  error
 }
 
 var ctx gpuContext
 
-func ensureGPU() {
+func ensureGPU() error {
 	ctx.once.Do(func() {
 		ctx.instance = wgpu.CreateInstance(nil)
+		if ctx.instance == nil {
+			ctx.initErr = fmt.Errorf("failed to create WebGPU instance")
+			return
+		}
+
 		var err error
-		ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
+		ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+			PowerPreference: wgpu.PowerPreferenceHighPerformance,
+		})
 		if err != nil {
-			panic(err)
+			ctx.initErr = fmt.Errorf("failed to request adapter: %v", err)
+			return
 		}
-		ctx.device, err = ctx.adapter.RequestDevice(nil)
+
+		ctx.device, err = ctx.adapter.RequestDevice(&wgpu.DeviceDescriptor{
+			Label: "Neural Network Device",
+		})
 		if err != nil {
-			panic(err)
+			ctx.initErr = fmt.Errorf("failed to request device: %v", err)
+			return
 		}
+
 		ctx.queue = ctx.device.GetQueue()
+		if ctx.queue == nil {
+			ctx.initErr = fmt.Errorf("failed to get device queue")
+			return
+		}
+
+		fmt.Println("✅ WebGPU initialized successfully")
 	})
+	return ctx.initErr
 }
 
 func newFloatBuf(data []float32, usage wgpu.BufferUsage) *wgpu.Buffer {
@@ -626,26 +647,52 @@ func (n *Network[T]) VerifyGPUSetup() error {
 		return fmt.Errorf("WebGPU not enabled")
 	}
 
-	if n.gpu.inBuf == nil {
-		return fmt.Errorf("input buffer not initialized")
+	// Check optimized GPU state instead of legacy buffers
+	if n.gpu.optimized == nil {
+		return fmt.Errorf("optimized GPU not initialized")
 	}
 
-	if len(n.gpu.stgBufs) == 0 {
-		return fmt.Errorf("no staging buffers created")
+	if !n.gpu.optimized.initialized {
+		return fmt.Errorf("optimized GPU not properly initialized")
 	}
 
-	for i, buf := range n.gpu.stgBufs {
-		if buf == nil {
-			return fmt.Errorf("staging buffer %d is nil", i)
+	if len(n.gpu.optimized.layers) == 0 {
+		return fmt.Errorf("no GPU layers created")
+	}
+
+	// Verify each layer has required buffers
+	for i, layer := range n.gpu.optimized.layers {
+		if layer == nil {
+			return fmt.Errorf("layer %d is nil", i)
 		}
-	}
 
-	if len(n.gpu.pipel) == 0 || n.gpu.pipel[0] == nil {
-		return fmt.Errorf("compute pipeline not created")
-	}
+		if layer.inputBuffer == nil {
+			return fmt.Errorf("layer %d input buffer not initialized", i)
+		}
 
-	if len(n.gpu.binds) == 0 || n.gpu.binds[0] == nil {
-		return fmt.Errorf("bind group not created")
+		if layer.outputBuffer == nil {
+			return fmt.Errorf("layer %d output buffer not initialized", i)
+		}
+
+		if layer.weightBuffer == nil {
+			return fmt.Errorf("layer %d weight buffer not initialized", i)
+		}
+
+		if layer.biasBuffer == nil {
+			return fmt.Errorf("layer %d bias buffer not initialized", i)
+		}
+
+		if layer.stagingBuffer == nil {
+			return fmt.Errorf("layer %d staging buffer not initialized", i)
+		}
+
+		if layer.pipeline == nil {
+			return fmt.Errorf("layer %d pipeline not initialized", i)
+		}
+
+		if layer.bindGroup == nil {
+			return fmt.Errorf("layer %d bind group not initialized", i)
+		}
 	}
 
 	return nil
