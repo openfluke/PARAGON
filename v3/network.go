@@ -91,9 +91,15 @@ func NewNetwork[T Numeric](
 	layerSizes []struct{ Width, Height int },
 	activations []string,
 	fullyConnected []bool,
+	seed ...int64, // Optional seed for consistent initialization
 ) *Network[T] {
 	if len(layerSizes) != len(activations) || len(layerSizes) != len(fullyConnected) {
 		panic("mismatched layer sizes, activations, or connectivity settings")
+	}
+
+	// Set random seed if provided
+	if len(seed) > 0 {
+		rand.Seed(seed[0])
 	}
 
 	n := &Network[T]{
@@ -103,12 +109,10 @@ func NewNetwork[T Numeric](
 		OutputLayer:   len(layerSizes) - 1,
 		Performance:   NewADHDPerformance(),
 		ReplayStats:   make(map[int][]int),
-		GrowthHistory: []GrowthLog{}, // ✅ Ensure safe append
+		GrowthHistory: []GrowthLog{},
 	}
 
-	// Set the WGSL type in the gpu struct based on T
 	n.gpu.wgslType = getWGSLType[T]()
-
 	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
 		n.BuildGPUKernels()
 	}
@@ -123,7 +127,7 @@ func NewNetwork[T Numeric](
 		for y := 0; y < size.Height; y++ {
 			grid.Neurons[y] = make([]*Neuron[T], size.Width)
 			for x := 0; x < size.Width; x++ {
-				var zero T // default zero value for T (e.g., 0 for float32)
+				var zero T
 				grid.Neurons[y][x] = &Neuron[T]{
 					ID:         idCounter,
 					Bias:       zero,
@@ -479,7 +483,7 @@ func (n *Network[T]) forwardCPU(inputs [][]float64) {
 // ---------------------------------------------------------------------------
 // Back‑prop with optional layer‑replay  (incl. attention weight update)
 // ---------------------------------------------------------------------------
-func (n *Network[T]) Backward(
+func (n *Network[T]) backwardCPU(
 	targets [][]float64,
 	lr float64,
 	clipUpper T,
@@ -576,6 +580,13 @@ func (n *Network[T]) Train(
 	clipUpper T,
 	clipLower T,
 ) {
+	// Use GPU-optimized training if available
+	if n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized {
+		n.TrainWithGPUSync(inputs, targets, epochs, learningRate, earlyStopOnNegativeLoss, clipUpper, clipLower)
+		return
+	}
+
+	// CPU training path
 	for epoch := 0; epoch < epochs; epoch++ {
 		totalLoss := 0.0
 		perm := rand.Perm(len(inputs))
@@ -599,6 +610,14 @@ func (n *Network[T]) Train(
 			}
 			totalLoss += loss
 			n.Backward(shuffledTargets[b], learningRate, clipUpper, clipLower)
+		}
+
+		// Sync GPU weights to CPU after each epoch if GPU is being used
+		// (This is for the case where GPU forward/backward are used individually)
+		if n.WebGPUNative && n.gpu.optimized != nil {
+			if err := n.SyncGPUWeightsToCPU(); err != nil {
+				fmt.Printf("Failed to sync GPU weights at epoch %d: %v\n", epoch, err)
+			}
 		}
 
 		fmt.Printf("Epoch %d, Loss: %.4f\n", epoch, totalLoss/float64(len(inputs)))
