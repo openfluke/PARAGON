@@ -551,36 +551,28 @@ func (n *Network[T]) readGPUResultsSafe() ([][]float32, error) {
 
 // Apply GPU results to network layers
 func (n *Network[T]) applyGPUResults(gpuResults [][]float32) error {
-	if len(gpuResults) == 0 {
-		return fmt.Errorf("no GPU results to apply")
+	if len(gpuResults) != n.OutputLayer {
+		return fmt.Errorf("GPU results length mismatch: got %d, expected %d", len(gpuResults), n.OutputLayer)
 	}
 
-	// Apply results to pre-output layer
-	layerIdx := n.OutputLayer - 1
-	if layerIdx < 0 || layerIdx >= len(gpuResults) {
-		return fmt.Errorf("invalid layer index for GPU results: %d", layerIdx)
-	}
+	// Apply results to all layers computed by GPU (1 to OutputLayer)
+	for l := 1; l <= n.OutputLayer; l++ {
+		g := &n.Layers[l]
+		out := gpuResults[l-1] // gpuResults[0] is layer 1, gpuResults[1] is layer 2, etc.
+		expectedElems := g.Width * g.Height
 
-	g := &n.Layers[layerIdx]
-	out := gpuResults[layerIdx]
-	expectedElems := g.Width * g.Height
+		if len(out) != expectedElems {
+			return fmt.Errorf("GPU output size mismatch for layer %d: got %d, expected %d", l, len(out), expectedElems)
+		}
 
-	if len(out) != expectedElems {
-		return fmt.Errorf("GPU output size mismatch for layer %d: got %d, expected %d",
-			layerIdx, len(out), expectedElems)
-	}
-
-	// Apply GPU results to neurons
-	idx := 0
-	for y := 0; y < g.Height; y++ {
-		for x := 0; x < g.Width; x++ {
-			g.Neurons[y][x].Value = T(out[idx])
-			idx++
+		idx := 0
+		for y := 0; y < g.Height; y++ {
+			for x := 0; x < g.Width; x++ {
+				g.Neurons[y][x].Value = T(out[idx])
+				idx++
+			}
 		}
 	}
-
-	// Compute final output layer on CPU
-	n.forwardLayer(n.OutputLayer)
 
 	return nil
 }

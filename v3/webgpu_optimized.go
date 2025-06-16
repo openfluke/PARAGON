@@ -32,6 +32,7 @@ type GPUCompute struct {
 	layers      []*GPULayerCompute
 	initialized bool
 	debug       bool
+	backward    *GPUBackwardResources
 }
 
 // Initialize GPU compute for the network
@@ -207,7 +208,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.weightBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Weights", layerIdx),
 		Contents: wgpu.ToBytes(weights),
-		Usage:    wgpu.BufferUsageStorage,
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -218,7 +219,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.biasBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Biases", layerIdx),
 		Contents: wgpu.ToBytes(biases),
-		Usage:    wgpu.BufferUsageStorage,
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -489,8 +490,6 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 	}
 
 	// Process each layer sequentially but with full GPU parallelization within each layer
-	//var currentInput []T = inputData
-
 	for i, layerCompute := range n.gpu.optimized.layers {
 		// Upload input data to GPU
 		ctx.queue.WriteBuffer(layerCompute.inputBuffer, 0, wgpu.ToBytes(inputData))
@@ -507,17 +506,14 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 		computePass.DispatchWorkgroups(layerCompute.workgroupsX, layerCompute.workgroupsY, 1)
 		computePass.End()
 
-		// Copy output to staging buffer for readback (only for final layer or if debugging)
-		if i == len(n.gpu.optimized.layers)-1 || n.Debug {
-			encoder.CopyBufferToBuffer(
-				layerCompute.outputBuffer, 0,
-				layerCompute.stagingBuffer, 0,
-				uint64(layerCompute.outputSize)*4,
-			)
-		}
+		// Copy output to staging buffer for readback
+		encoder.CopyBufferToBuffer(
+			layerCompute.outputBuffer, 0,
+			layerCompute.stagingBuffer, 0,
+			uint64(layerCompute.outputSize)*4,
+		)
 
-		// For next iteration, we need to read the output as input
-		// This is the bottleneck we need to minimize
+		// For next iteration, copy output to next layer's input
 		if i < len(n.gpu.optimized.layers)-1 {
 			nextLayerCompute := n.gpu.optimized.layers[i+1]
 			encoder.CopyBufferToBuffer(
@@ -536,18 +532,51 @@ func (n *Network[T]) ForwardGPUOptimized(inputs [][]float64) error {
 
 	ctx.queue.Submit(commandBuffer)
 
-	// Wait for completion and read final results
+	// Wait for completion
 	ctx.device.Poll(true, nil)
 
-	// Read final layer output
+	// Handle final layer output
 	finalLayer := n.gpu.optimized.layers[len(n.gpu.optimized.layers)-1]
 	finalOutput, err := n.readStagingBuffer(finalLayer.stagingBuffer, int(finalLayer.outputSize))
 	if err != nil {
 		return fmt.Errorf("failed to read final output: %v", err)
 	}
 
-	// Apply results to network
-	n.applyFinalOutput(finalOutput)
+	// Check if output layer uses softmax
+	if n.Layers[n.OutputLayer].Neurons[0][0].Activation == "softmax" {
+		// Convert pre-activation values to float64 for softmax computation
+		preActFloat := make([]float64, len(finalOutput))
+		for i, v := range finalOutput {
+			preActFloat[i] = float64(v)
+		}
+
+		// Apply softmax
+		postActFloat := Softmax(preActFloat)
+
+		// Convert back to type T
+		postAct := make([]T, len(postActFloat))
+		for i, v := range postActFloat {
+			postAct[i] = T(v)
+		}
+
+		// Write post-activation values back to GPU output buffer
+		ctx.queue.WriteBuffer(finalLayer.outputBuffer, 0, wgpu.ToBytes(postAct))
+
+		// Update neuron values with post-activation values
+		outputLayer := &n.Layers[n.OutputLayer]
+		idx := 0
+		for y := 0; y < outputLayer.Height; y++ {
+			for x := 0; x < outputLayer.Width; x++ {
+				if idx < len(postAct) {
+					outputLayer.Neurons[y][x].Value = postAct[idx]
+					idx++
+				}
+			}
+		}
+	} else {
+		// For non-softmax activations, shader already applied activation
+		n.applyFinalOutput(finalOutput)
+	}
 
 	return nil
 }
@@ -705,8 +734,21 @@ type gpuResources struct {
 }
 */
 
-// Update the main Forward method to use optimized GPU
+// In the Forward method in webgpu_optimized.go, ensure initialization:
 func (n *Network[T]) Forward(inputs [][]float64) {
+	// Initialize optimized GPU if not already done
+	if n.WebGPUNative && n.gpu.optimized == nil {
+		if err := n.InitializeOptimizedGPU(); err != nil {
+			if n.Debug {
+				fmt.Printf("Failed to initialize optimized GPU: %v\n", err)
+			}
+			n.WebGPUNative = false
+			n.forwardCPU(inputs)
+			n.WebGPUNative = true
+			return
+		}
+	}
+
 	// Use optimized GPU if available and enabled
 	if n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized {
 		err := n.ForwardGPUOptimized(inputs)
