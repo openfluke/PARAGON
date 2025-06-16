@@ -208,7 +208,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.weightBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Weights", layerIdx),
 		Contents: wgpu.ToBytes(weights),
-		Usage:    wgpu.BufferUsageStorage,
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		layerCompute.cleanup()
@@ -219,7 +219,7 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	layerCompute.biasBuffer, err = ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    fmt.Sprintf("Layer_%d_Biases", layerIdx),
 		Contents: wgpu.ToBytes(biases),
-		Usage:    wgpu.BufferUsageStorage,
+		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
 		layerCompute.cleanup()

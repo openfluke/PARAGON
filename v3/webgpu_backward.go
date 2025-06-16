@@ -825,10 +825,36 @@ func (n *Network[T]) TrainWithGPUSync(
 	}
 }
 
-// Integration Notes:
-// 1. Update the existing Train() method in network.go to call TrainWithGPUSync when GPU is enabled
-// 2. Add `backward *GPUBackwardResources` field to the GPUCompute struct in webgpu_optimized.go
-// 3. The Backward() method in network.go should be updated as shown above to call BackwardGPUOptimized
-// 4. GPU synchronization happens after each epoch to keep CPU and GPU models in sync
-// 5. Gradient clipping is handled in the GPU shaders directly
-// 6. The replay mechanism is simplified for GPU - it records counts but doesn't re-execute on GPU
+func (n *Network[T]) SyncCPUWeightsToGPU() error {
+	if n.gpu.optimized == nil || !n.gpu.optimized.initialized {
+		return fmt.Errorf("GPU not initialized")
+	}
+
+	for l := 1; l <= n.OutputLayer; l++ {
+		layerGPU := n.gpu.optimized.layers[l-1]
+		weights, biases := n.extractLayerWeightsAndBiases(l)
+
+		// Write weights with error checking
+		if err := ctx.queue.WriteBuffer(layerGPU.weightBuffer, 0, wgpu.ToBytes(weights)); err != nil {
+			return fmt.Errorf("failed to write weights to GPU for layer %d: %v", l, err)
+		}
+
+		// Write biases with error checking
+		if err := ctx.queue.WriteBuffer(layerGPU.biasBuffer, 0, wgpu.ToBytes(biases)); err != nil {
+			return fmt.Errorf("failed to write biases to GPU for layer %d: %v", l, err)
+		}
+
+		//if n.Debug {
+		fmt.Printf("Synced CPU weights to GPU for layer %d\n", l)
+		//}
+
+		if n.Debug {
+			sampleWeights := weights[:min(5, len(weights))]
+			fmt.Printf("Layer %d - CPU weights: %v\n", l, sampleWeights)
+			gpuWeights, _ := n.readGPUBuffer(layerGPU.weightBuffer, 5)
+			fmt.Printf("Layer %d - GPU weights: %v\n", l, gpuWeights)
+		}
+	}
+
+	return nil
+}
