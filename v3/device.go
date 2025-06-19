@@ -78,3 +78,7 @@ func GetAllGPUInfo() ([]map[string]string, error) {
 
     return gpuInfo, nil
 }
+
+func (n *Network[T]) GetAllGPUInfo() ([]map[string]string, error) {
+    return GetAllGPUInfo()
+}
