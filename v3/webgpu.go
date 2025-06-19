@@ -18,14 +18,32 @@ type gpuContext struct {
 
 var ctx gpuContext
 
+
 func ensureGPU() {
 	ctx.once.Do(func() {
 		ctx.instance = wgpu.CreateInstance(nil)
 		var err error
-		ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
+		
+		// First try high-performance GPU
+		ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+			PowerPreference: wgpu.PowerPreferenceHighPerformance,
+		})
 		if err != nil {
-			panic(err)
+			// Fallback to any available adapter
+			fmt.Printf("⚠️ High-performance GPU not available, using default: %v\n", err)
+			ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
+			if err != nil {
+				panic(err)
+			}
 		}
+		
+		// Log which GPU we got
+		if ctx.adapter != nil {
+			info := ctx.adapter.GetInfo()
+			fmt.Printf("🚀 GPU Selected: %s (%s) - Type: %v\n", 
+				info.Name, info.VendorName, info.AdapterType)
+		}
+		
 		ctx.device, err = ctx.adapter.RequestDevice(nil)
 		if err != nil {
 			panic(err)
