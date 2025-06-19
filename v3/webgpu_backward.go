@@ -815,7 +815,7 @@ func (n *Network[T]) TrainWithGPUSync(
 
 		// Sync GPU weights to CPU after each epoch
 		if n.WebGPUNative && n.gpu.optimized != nil {
-			fmt.Println("COPY WEIGHTS FROM GPU TO CPU")
+			//fmt.Println("COPY WEIGHTS FROM GPU TO CPU")
 			if err := n.SyncGPUWeightsToCPU(); err != nil {
 				fmt.Printf("Failed to sync GPU weights at epoch %d: %v\n", epoch, err)
 			}
