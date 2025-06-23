@@ -939,10 +939,15 @@ func (n *Network[T]) AddLayer(layerIdx int, width, height int, activation string
 
 func (n *Network[T]) GetOutput() []float64 {
 	outputLayer := n.Layers[n.OutputLayer]
-	output := make([]float64, outputLayer.Width)
+	// Return all neuron values from the output layer (Width × Height)
+	output := make([]float64, outputLayer.Width*outputLayer.Height)
 
-	for x := 0; x < outputLayer.Width; x++ {
-		output[x] = float64(any(outputLayer.Neurons[0][x].Value).(T))
+	idx := 0
+	for y := 0; y < outputLayer.Height; y++ {
+		for x := 0; x < outputLayer.Width; x++ {
+			output[idx] = float64(any(outputLayer.Neurons[y][x].Value).(T))
+			idx++
+		}
 	}
 
 	return output
