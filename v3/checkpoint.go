@@ -45,7 +45,7 @@ func (n *Network[T]) ForwardFromLayer(layerIdx int, layerState [][]float64) {
 
 	// Propagate forward from that layer
 	for l := layerIdx + 1; l <= n.OutputLayer; l++ {
-		n.forwardLayer(l)
+		n.forwardLayer(l, false)
 	}
 
 	// Apply softmax if final layer requests it
@@ -113,7 +113,7 @@ func (n *Network[T]) ForwardUntilLayer(input [][]float64, stopLayer int) {
 
 	// Forward pass layer by layer until stopLayer (inclusive)
 	for l := 1; l <= stopLayer; l++ {
-		n.forwardLayer(l)
+		n.forwardLayer(l, false)
 
 		// Apply softmax if stop layer is output layer with softmax activation
 		if l == n.OutputLayer && n.Layers[l].Neurons[0][0].Activation == "softmax" {

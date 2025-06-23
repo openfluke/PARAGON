@@ -25,7 +25,8 @@ type Grid[T Numeric] struct {
 	ReplayGateFunc   func(input [][]T) float64 // Entropy/uncertainty score
 	ReplayGateToReps func(score float64) int   // Maps score to actual replays
 
-	CachedOutputs []T // used for entropy-based replay gating
+	CachedOutputs        []T   // used for entropy-based replay gating
+	CachedOutputsHistory [][]T // History of activations for temporal replay (3 passes)
 }
 
 // Neuron represents a single unit in the grid
@@ -293,10 +294,8 @@ func (n *Network[T]) ConnectLayers(fullyConnected []bool) {
 }
 
 // forwardLayer computes the forward pass for a layer
-func (n *Network[T]) forwardLayer(l int) {
+func (n *Network[T]) forwardLayer(l int, isReplay bool) {
 	curr := n.Layers[l]
-
-	// CPU fallback
 	for y := 0; y < curr.Height; y++ {
 		for x := 0; x < curr.Width; x++ {
 			neuron := curr.Neurons[y][x]
@@ -305,7 +304,12 @@ func (n *Network[T]) forwardLayer(l int) {
 				src := n.Layers[c.SourceLayer].Neurons[c.SourceY][c.SourceX]
 				sum += src.Value * c.Weight
 			}
-			neuron.Value = ApplyActivationGeneric(sum, neuron.Activation)
+			value := ApplyActivationGeneric(sum, neuron.Activation)
+			if isReplay {
+				// Apply a scaling factor during replay to alter the output
+				value = T(float64(value) * 1.1)
+			}
+			neuron.Value = value
 		}
 	}
 }
@@ -313,9 +317,10 @@ func (n *Network[T]) forwardLayer(l int) {
 func (n *Network[T]) backwardLayer(
 	l int,
 	err [][][]T,
-	lr float64, // changed from T to float64
+	lr float64,
 	clipUpper T,
 	clipLower T,
+	isReplay bool,
 ) {
 	curr := n.Layers[l]
 	prev := n.Layers[l-1]
@@ -325,6 +330,11 @@ func (n *Network[T]) backwardLayer(
 			neuron := curr.Neurons[y][x]
 			localT := err[l][y][x]
 			localF := float64(localT)
+
+			// Apply scaling factor during replay
+			if isReplay {
+				localF *= 1.1 // Scale gradient by 1.1 during replay
+			}
 
 			// ─── Update bias ───
 			deltaBias := lr * localF
@@ -416,39 +426,33 @@ func (n *Network[T]) forwardCPU(inputs [][]float64) {
 		layer := &n.Layers[l]
 
 		// 🌀 Replay: BEFORE
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "before" &&
-			replayed[l] < layer.MaxReplay {
-
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "before" && replayed[l] < layer.MaxReplay {
 			start := l + layer.ReplayOffset
 			if start <= n.InputLayer {
 				start = n.InputLayer + 1
 			}
 			if start >= 1 && start <= l {
 				for i := start; i <= l; i++ {
-					n.forwardLayer(i)
+					n.forwardLayer(i, true) // Replay computation with scaling
 					n.Layers[i].CachedOutputs = CastFloat64SliceToT[T](n.Layers[i].GetOutputValues())
 				}
-				replayed[l]++
+				replayed[l]++ // Increment the replay count for this layer
 			}
 		}
 
 		// 🚀 Main forward pass
-		n.forwardLayer(l)
+		n.forwardLayer(l, false)
 		layer.CachedOutputs = CastFloat64SliceToT[T](layer.GetOutputValues())
 
 		// 🌀 Replay: AFTER
-		if layer.ReplayOffset != 0 &&
-			layer.ReplayPhase == "after" &&
-			replayed[l] < layer.MaxReplay {
-
+		if layer.ReplayOffset != 0 && layer.ReplayPhase == "after" && replayed[l] < layer.MaxReplay {
 			start := l + layer.ReplayOffset
 			if start <= n.InputLayer {
 				start = n.InputLayer + 1
 			}
 			if start >= 1 && start <= l {
 				for i := start; i <= l; i++ {
-					n.forwardLayer(i)
+					n.forwardLayer(i, true) // Replay computation with scaling
 					n.Layers[i].CachedOutputs = CastFloat64SliceToT[T](n.Layers[i].GetOutputValues())
 				}
 				replayed[l]++
@@ -456,7 +460,14 @@ func (n *Network[T]) forwardCPU(inputs [][]float64) {
 		}
 
 		// 🎯 Dynamic gated replay
+		// 🎯 Dynamic gated replay
+		// 🎯 Dynamic gated replay
 		if layer.ReplayEnabled && layer.ReplayGateFunc != nil {
+			// Update activation history
+			if len(layer.CachedOutputsHistory) >= 5 {
+				layer.CachedOutputsHistory = layer.CachedOutputsHistory[1:] // Slide window
+			}
+			layer.CachedOutputsHistory = append(layer.CachedOutputsHistory, append([]T{}, layer.CachedOutputs...))
 			score := layer.ReplayGateFunc(nil)
 			nreps := layer.ReplayBudget
 			if layer.ReplayGateToReps != nil {
@@ -465,10 +476,14 @@ func (n *Network[T]) forwardCPU(inputs [][]float64) {
 			if nreps > layer.ReplayBudget {
 				nreps = layer.ReplayBudget
 			}
-
 			for i := 0; i < nreps; i++ {
-				n.forwardLayer(l)
+				n.forwardLayer(l, true)
 				layer.CachedOutputs = CastFloat64SliceToT[T](layer.GetOutputValues())
+				// Update history during replays
+				if len(layer.CachedOutputsHistory) >= 5 {
+					layer.CachedOutputsHistory = layer.CachedOutputsHistory[1:]
+				}
+				layer.CachedOutputsHistory = append(layer.CachedOutputsHistory, append([]T{}, layer.CachedOutputs...))
 				replayed[l]++
 			}
 		}
@@ -524,25 +539,23 @@ func (n *Network[T]) backwardCPU(
 		if layer.ReplayOffset != 0 &&
 			layer.ReplayPhase == "before" &&
 			replayed[l] < layer.MaxReplay {
-
 			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
 			for i := l; i >= stop; i-- {
-				n.backwardLayer(i, err, float64(lr), clipUpper, clipLower)
+				n.backwardLayer(i, err, float64(lr), clipUpper, clipLower, true) // Replay with scaling
 			}
 			replayed[l]++
 		}
 
 		// 🔁 Normal backprop
-		n.backwardLayer(l, err, float64(lr), clipUpper, clipLower)
+		n.backwardLayer(l, err, float64(lr), clipUpper, clipLower, false)
 
 		// 🔁 Manual Replay — after
 		if layer.ReplayOffset != 0 &&
 			layer.ReplayPhase == "after" &&
 			replayed[l] < layer.MaxReplay {
-
 			stop := max(l+layer.ReplayOffset, n.InputLayer+1)
 			for i := l; i >= stop; i-- {
-				n.backwardLayer(i, err, float64(lr), clipUpper, clipLower)
+				n.backwardLayer(i, err, float64(lr), clipUpper, clipLower, true) // Replay with scaling
 			}
 			replayed[l]++
 		}
@@ -559,7 +572,7 @@ func (n *Network[T]) backwardCPU(
 			}
 
 			for i := 0; i < nreps; i++ {
-				n.backwardLayer(l, err, float64(lr), clipUpper, clipLower)
+				n.backwardLayer(l, err, float64(lr), clipUpper, clipLower, true) // Treat gated replay as scaled
 				replayed[l]++
 			}
 
