@@ -4,7 +4,6 @@ package paragon
 import (
 	"fmt"
 	"math"
-	"math/rand"
 
 	"github.com/openfluke/webgpu/wgpu"
 )
@@ -787,18 +786,11 @@ func (n *Network[T]) TrainWithGPUSync(
 ) {
 	for epoch := 0; epoch < epochs; epoch++ {
 		totalLoss := 0.0
-		perm := rand.Perm(len(inputs))
-		shuffledInputs := make([][][]float64, len(inputs))
-		shuffledTargets := make([][][]float64, len(targets))
-		for i, p := range perm {
-			shuffledInputs[i] = inputs[p]
-			shuffledTargets[i] = targets[p]
-		}
 
-		for b := 0; b < len(shuffledInputs); b++ {
+		for b := 0; b < len(inputs); b++ {
 			// Forward pass on GPU
-			n.Forward(shuffledInputs[b])
-			loss := n.ComputeLoss(shuffledTargets[b])
+			n.Forward(inputs[b])
+			loss := n.ComputeLoss(targets[b])
 			if math.IsNaN(loss) {
 				fmt.Printf("NaN loss detected at sample %d, epoch %d\n", b, epoch)
 				continue
@@ -810,7 +802,7 @@ func (n *Network[T]) TrainWithGPUSync(
 			totalLoss += loss
 
 			// Backward pass on GPU
-			n.Backward(shuffledTargets[b], learningRate, clipUpper, clipLower)
+			n.Backward(targets[b], learningRate, clipUpper, clipLower)
 		}
 
 		// Sync GPU weights to CPU after each epoch
