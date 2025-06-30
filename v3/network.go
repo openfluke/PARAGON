@@ -93,9 +93,9 @@ func NewNetwork[T Numeric](
 	activations []string,
 	fullyConnected []bool,
 	seed ...int64, // Optional seed for consistent initialization
-) *Network[T] {
+) (*Network[T], error) {
 	if len(layerSizes) != len(activations) || len(layerSizes) != len(fullyConnected) {
-		panic("mismatched layer sizes, activations, or connectivity settings")
+		return nil, fmt.Errorf("mismatched layer sizes, activations, or connectivity settings")
 	}
 
 	// Set random seed if provided
@@ -115,7 +115,12 @@ func NewNetwork[T Numeric](
 
 	n.gpu.wgslType = getWGSLType[T]()
 	if any(*new(T)).(T) == T(float32(0)) && n.WebGPUNative {
-		n.BuildGPUKernels()
+		if err := n.BuildGPUKernels(); err != nil {
+			n.WebGPUNative = false // Fallback to CPU if GPU init fails
+			fmt.Printf("Failed to initialize GPU kernels: %v\n", err)
+
+			// Continue without returning
+		}
 	}
 
 	idCounter := 0
@@ -142,7 +147,7 @@ func NewNetwork[T Numeric](
 	}
 
 	n.ConnectLayers(fullyConnected)
-	return n
+	return n, nil
 }
 
 // -----------------------------------------------------------------------------

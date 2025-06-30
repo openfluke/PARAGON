@@ -34,7 +34,7 @@ func (n *Network[T]) ExtractMicroNetwork(checkpointLayer int) *MicroNetwork[T] {
 
 	microFullyConnected := []bool{true, true}
 
-	microNet := NewNetwork[T](microLayerSizes, microActivations, microFullyConnected)
+	microNet, _ := NewNetwork[T](microLayerSizes, microActivations, microFullyConnected)
 	microNet.Debug = false
 
 	// Copy weights from original network: checkpoint → output becomes layer 0 → 1

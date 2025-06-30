@@ -16,3 +16,4 @@ NeuralArena
 flow
 *.docx
 wrap
+.DS_Store

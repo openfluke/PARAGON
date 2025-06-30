@@ -302,7 +302,7 @@ func (mn *MicroNetwork[T]) TryImprovement(
 	improvedActivations := []string{checkpointAct, newAct, outputAct}
 	improvedFullyConnected := []bool{true, true, true}
 
-	improvedNet := NewNetwork[T](improvedLayerSizes, improvedActivations, improvedFullyConnected)
+	improvedNet, _ := NewNetwork[T](improvedLayerSizes, improvedActivations, improvedFullyConnected)
 	improvedNet.Debug = false
 
 	// Copy output weights from original micro (0→1) to improved (1→2)

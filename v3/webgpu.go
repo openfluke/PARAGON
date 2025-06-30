@@ -18,50 +18,152 @@ type gpuContext struct {
 
 var ctx gpuContext
 
-
-func ensureGPU() {
+func ensureGPU() error {
+	var initErr error
 	ctx.once.Do(func() {
-		ctx.instance = wgpu.CreateInstance(nil)
-		var err error
-		
-		// First try high-performance GPU
-		ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
-			PowerPreference: wgpu.PowerPreferenceHighPerformance,
-		})
-		if err != nil {
-			// Fallback to any available adapter
-			fmt.Printf("⚠️ High-performance GPU not available, using default: %v\n", err)
-			ctx.adapter, err = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
-			if err != nil {
-				panic(err)
+		if IsWASM() {
+			// Call WASM-specific initialization (defined in webgpu_wasm.go)
+			initErr = initGPUForWASM()
+			if initErr != nil {
+				initErr = fmt.Errorf("WASM GPU initialization failed: %v", initErr)
+			}
+		} else {
+			// Non-WASM initialization
+			ctx.instance = wgpu.CreateInstance(nil)
+			if ctx.instance == nil {
+				initErr = fmt.Errorf("failed to create WebGPU instance")
+				return
+			}
+			ctx.adapter, initErr = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+				PowerPreference: wgpu.PowerPreferenceHighPerformance,
+			})
+			if initErr != nil {
+				fmt.Printf("⚠️ High-performance GPU not available, using default: %v\n", initErr)
+				ctx.adapter, initErr = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
+				if initErr != nil {
+					initErr = fmt.Errorf("failed to request adapter: %v", initErr)
+					return
+				}
+			}
+			if ctx.adapter != nil {
+				info := ctx.adapter.GetInfo()
+				fmt.Printf("🚀 GPU Selected: %s (%s) - Type: %v\n",
+					info.Name, info.VendorName, info.AdapterType)
+			}
+			ctx.device, initErr = ctx.adapter.RequestDevice(nil)
+			if initErr != nil {
+				initErr = fmt.Errorf("failed to request device: %v", initErr)
+				return
+			}
+			ctx.queue = ctx.device.GetQueue()
+			if ctx.queue == nil {
+				initErr = fmt.Errorf("failed to get queue")
+				return
 			}
 		}
-		
-		// Log which GPU we got
-		if ctx.adapter != nil {
-			info := ctx.adapter.GetInfo()
-			fmt.Printf("🚀 GPU Selected: %s (%s) - Type: %v\n", 
-				info.Name, info.VendorName, info.AdapterType)
-		}
-		
-		ctx.device, err = ctx.adapter.RequestDevice(nil)
-		if err != nil {
-			panic(err)
-		}
-		ctx.queue = ctx.device.GetQueue()
 	})
+	if initErr != nil {
+		return fmt.Errorf("ensureGPU failed: %v", initErr)
+	}
+	if ctx.device == nil || ctx.queue == nil {
+		return fmt.Errorf("WebGPU device or queue not initialized")
+	}
+	return nil
 }
 
-func newFloatBuf(data []float32, usage wgpu.BufferUsage) *wgpu.Buffer {
+// IsWASM returns true if running in a WASM environment.
+// This can be a simple runtime check or a build-time constant.
+func IsWASM() bool {
+	// For simplicity, you can use a runtime check or build tag.
+	// For now, assume it's set externally or via build tags.
+	return false // Replace with actual logic if needed.
+}
+
+/*
+func ensureGPU() error {
+	var initErr error
+	ctx.once.Do(func() {
+		if IsWASM() {
+			jsGlobal := js.Global()
+			if !jsGlobal.Get("paragonWebGPU").Truthy() {
+				initErr = fmt.Errorf("JavaScript WebGPU context (paragonWebGPU) not found")
+				return
+			}
+			deviceJS := jsGlobal.Get("paragonWebGPU").Get("device")
+			queueJS := jsGlobal.Get("paragonWebGPU").Get("queue")
+			if !deviceJS.Truthy() {
+				initErr = fmt.Errorf("JavaScript WebGPU device not available")
+				return
+			}
+			if !queueJS.Truthy() {
+				initErr = fmt.Errorf("JavaScript WebGPU queue not available")
+				return
+			}
+			device := wgpu.NewDevice(deviceJS)
+			ctx.device = &device
+			ctx.queue = ctx.device.GetQueue()
+			if ctx.device == nil {
+				initErr = fmt.Errorf("failed to initialize WebGPU device")
+				return
+			}
+			if ctx.queue == nil {
+				initErr = fmt.Errorf("failed to initialize WebGPU queue")
+				return
+			}
+			fmt.Println("Created WebGPU device successfully")
+		} else {
+			ctx.instance = wgpu.CreateInstance(nil)
+			if ctx.instance == nil {
+				initErr = fmt.Errorf("failed to create WebGPU instance")
+				return
+			}
+			ctx.adapter, initErr = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+				PowerPreference: wgpu.PowerPreferenceHighPerformance,
+			})
+			if initErr != nil {
+				fmt.Printf("⚠️ High-performance GPU not available, using default: %v\n", initErr)
+				ctx.adapter, initErr = ctx.instance.RequestAdapter(&wgpu.RequestAdapterOptions{})
+				if initErr != nil {
+					initErr = fmt.Errorf("failed to request adapter: %v", initErr)
+					return
+				}
+			}
+			if ctx.adapter != nil {
+				info := ctx.adapter.GetInfo()
+				fmt.Printf("🚀 GPU Selected: %s (%s) - Type: %v\n",
+					info.Name, info.VendorName, info.AdapterType)
+			}
+			ctx.device, initErr = ctx.adapter.RequestDevice(nil)
+			if initErr != nil {
+				initErr = fmt.Errorf("failed to request device: %v", initErr)
+				return
+			}
+			ctx.queue = ctx.device.GetQueue()
+			if ctx.queue == nil {
+				initErr = fmt.Errorf("failed to get queue")
+				return
+			}
+		}
+	})
+	if initErr != nil {
+		return fmt.Errorf("ensureGPU failed: %v", initErr)
+	}
+	if ctx.device == nil || ctx.queue == nil {
+		return fmt.Errorf("WebGPU device or queue not initialized")
+	}
+	return nil
+}*/
+
+func newFloatBuf(data []float32, usage wgpu.BufferUsage) (*wgpu.Buffer, error) {
 	ensureGPU()
 	buf, err := ctx.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Contents: wgpu.ToBytes(data),
 		Usage:    usage,
 	})
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to create buffer: %v", err)
 	}
-	return buf
+	return buf, nil
 }
 
 func actCodeOf(name string) int {
@@ -144,11 +246,20 @@ func allLayersShaderWGSL(layerSizes []struct{ in, out, act int }) string {
 	return shader
 }
 
-func (n *Network[T]) BuildGPUKernels() {
-	if !n.WebGPUNative || any(*new(T)).(T) != T(float32(0)) || len(n.Layers) < 2 {
-		return
+func (n *Network[T]) BuildGPUKernels() error {
+	if !n.WebGPUNative {
+		return fmt.Errorf("WebGPU not enabled")
 	}
-	ensureGPU()
+	if any(*new(T)).(T) != T(float32(0)) {
+		return fmt.Errorf("GPU kernels only supported for float32 networks")
+	}
+	if len(n.Layers) < 2 {
+		return fmt.Errorf("network must have at least 2 layers for GPU kernels")
+	}
+
+	if err := ensureGPU(); err != nil {
+		return fmt.Errorf("failed to initialize GPU: %v", err)
+	}
 
 	// Clear existing GPU resources
 	n.gpu.inBuf, n.gpu.stgBuf = nil, nil
@@ -158,7 +269,7 @@ func (n *Network[T]) BuildGPUKernels() {
 
 	inElems := n.Layers[0].Width * n.Layers[0].Height
 	if inElems <= 0 {
-		panic(fmt.Sprintf("Invalid input layer size: %dx%d", n.Layers[0].Width, n.Layers[0].Height))
+		return fmt.Errorf("invalid input layer size: %dx%d", n.Layers[0].Width, n.Layers[0].Height)
 	}
 
 	var err error
@@ -167,7 +278,7 @@ func (n *Network[T]) BuildGPUKernels() {
 		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
 	})
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create input buffer: %v", err))
+		return fmt.Errorf("failed to create input buffer: %v", err)
 	}
 
 	layerSizes := make([]struct{ in, out, act int }, n.OutputLayer)
@@ -179,7 +290,7 @@ func (n *Network[T]) BuildGPUKernels() {
 		in := prev.Width * prev.Height
 		out := cur.Width * cur.Height
 		if in <= 0 || out <= 0 {
-			panic(fmt.Sprintf("Invalid layer %d size: in=%d, out=%d", l, in, out))
+			return fmt.Errorf("invalid layer %d size: in=%d, out=%d", l, in, out)
 		}
 		layerSizes[l-1] = struct{ in, out, act int }{in, out, actCodeOf(cur.Neurons[0][0].Activation)}
 
@@ -196,8 +307,16 @@ func (n *Network[T]) BuildGPUKernels() {
 				b[y*cur.Width+x] = float32(any(cur.Neurons[y][x].Bias).(T))
 			}
 		}
-		n.gpu.wBufs = append(n.gpu.wBufs, newFloatBuf(w, wgpu.BufferUsageStorage))
-		n.gpu.bBufs = append(n.gpu.bBufs, newFloatBuf(b, wgpu.BufferUsageStorage))
+		wBuf, err := newFloatBuf(w, wgpu.BufferUsageStorage)
+		if err != nil {
+			return fmt.Errorf("failed to create weight buffer for layer %d: %v", l-1, err)
+		}
+		n.gpu.wBufs = append(n.gpu.wBufs, wBuf)
+		bBuf, err := newFloatBuf(b, wgpu.BufferUsageStorage)
+		if err != nil {
+			return fmt.Errorf("failed to create bias buffer for layer %d: %v", l-1, err)
+		}
+		n.gpu.bBufs = append(n.gpu.bBufs, bBuf)
 
 		// Create output buffer
 		n.gpu.oBufs[l-1], err = ctx.device.CreateBuffer(&wgpu.BufferDescriptor{
@@ -205,7 +324,7 @@ func (n *Network[T]) BuildGPUKernels() {
 			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
 		})
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create output buffer for layer %d: %v", l-1, err))
+			return fmt.Errorf("failed to create output buffer for layer %d: %v", l-1, err)
 		}
 
 		// Create staging buffer (FIX: this was creating oBufs twice)
@@ -214,7 +333,7 @@ func (n *Network[T]) BuildGPUKernels() {
 			Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
 		})
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create staging buffer for layer %d: %v", l-1, err))
+			return fmt.Errorf("failed to create staging buffer for layer %d: %v", l-1, err)
 		}
 	}
 
@@ -224,14 +343,14 @@ func (n *Network[T]) BuildGPUKernels() {
 		WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: code},
 	})
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create shader module: %v", err))
+		return fmt.Errorf("failed to create shader module: %v", err)
 	}
 
 	pipe, err := ctx.device.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
 		Compute: wgpu.ProgrammableStageDescriptor{Module: mod, EntryPoint: "main"},
 	})
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create compute pipeline: %v", err))
+		return fmt.Errorf("failed to create compute pipeline: %v", err)
 	}
 	layout := pipe.GetBindGroupLayout(0)
 
@@ -251,7 +370,7 @@ func (n *Network[T]) BuildGPUKernels() {
 		Entries: entries,
 	})
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create bind group: %v", err))
+		return fmt.Errorf("failed to create bind group: %v", err)
 	}
 
 	n.gpu.pipel = []*wgpu.ComputePipeline{pipe}
@@ -261,6 +380,8 @@ func (n *Network[T]) BuildGPUKernels() {
 	if n.Debug {
 		fmt.Printf("GPU kernels built successfully with %d layers\n", n.OutputLayer)
 	}
+
+	return nil
 }
 
 func (n *Network[float32]) forwardGPU(sample [][]float64) (*wgpu.Buffer, error) {

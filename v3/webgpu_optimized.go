@@ -82,6 +82,11 @@ func (n *Network[T]) createLayerCompute(layerIdx int) (*GPULayerCompute, error) 
 	// Create shader for this specific layer
 	shaderCode := n.generateLayerShader(layerIdx, inputSize, outputSize)
 
+	// Check ctx.device before use
+	if ctx.device == nil {
+		return nil, fmt.Errorf("WebGPU device not initialized for layer %d", layerIdx)
+	}
+
 	// Create shader module
 	module, err := ctx.device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
 		Label:          fmt.Sprintf("Layer_%d_Shader", layerIdx),
@@ -739,9 +744,9 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 	// Initialize optimized GPU if not already done
 	if n.WebGPUNative && n.gpu.optimized == nil {
 		if err := n.InitializeOptimizedGPU(); err != nil {
-			if n.Debug {
-				fmt.Printf("Failed to initialize optimized GPU: %v\n", err)
-			}
+			//if n.Debug {
+			fmt.Errorf("Failed to initialize optimized GPU: %v\n", err)
+			//}
 			n.WebGPUNative = false
 			n.forwardCPU(inputs)
 			n.WebGPUNative = true
@@ -753,9 +758,9 @@ func (n *Network[T]) Forward(inputs [][]float64) {
 	if n.WebGPUNative && n.gpu.optimized != nil && n.gpu.optimized.initialized {
 		err := n.ForwardGPUOptimized(inputs)
 		if err != nil {
-			if n.Debug {
-				fmt.Printf("Optimized GPU forward failed, falling back to CPU: %v\n", err)
-			}
+			//	if n.Debug {
+			fmt.Errorf("Optimized GPU forward failed, falling back to CPU: %v\n", err)
+			//}
 			// Fall back to CPU
 			n.forwardCPU(inputs)
 		}
